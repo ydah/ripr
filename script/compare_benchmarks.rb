@@ -134,6 +134,7 @@ module CompareBenchmarks
       readers.each(&:value)
     end
     elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    timed_out ||= elapsed >= config.fetch("timeout_seconds", 120)
     logs = File.join(config.fetch("directory"), "comparison-logs")
     FileUtils.mkdir_p(logs)
     File.write(File.join(logs, "#{label}.stdout"), stdout)

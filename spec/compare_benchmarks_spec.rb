@@ -7,6 +7,40 @@ require "rbconfig"
 require "tmpdir"
 
 RSpec.describe "end-to-end benchmark script" do
+  it "rejects an over-budget return when timeout delivery was delayed" do
+    Dir.mktmpdir("ripr-delayed-timeout") do |directory|
+      File.write(File.join(directory, "source.rb"), "42\n")
+      bootstrap = File.join(directory, "delayed-timeout.rb")
+      File.write(bootstrap, <<~RUBY)
+        require "timeout"
+        module DelayedTimeout
+          def timeout(*)
+            yield
+          end
+        end
+        Timeout.singleton_class.prepend(DelayedTimeout)
+      RUBY
+      code = 'sleep 0.1; puts %q({"summary":{"killed":1,"survived":0}})'
+      command = [RbConfig.ruby, "-e", code]
+      config = { "project" => "delayed", "tool" => "ripr", "directory" => directory,
+                 "file" => "source.rb", "before" => "42", "after" => "(42)", "caches" => [],
+                 "full" => command, "incremental" => command, "format" => "ripr", "timeout_seconds" => 0.02,
+                 "env" => { "RUBYOPT" => [ENV.fetch("RUBYOPT", nil), "-r#{bootstrap}"].compact.join(" ") } }
+      manifest = File.join(directory, "manifest.json")
+      destination = File.join(directory, "results.json")
+      File.write(manifest, JSON.generate([config]))
+      script = File.expand_path("../script/compare_benchmarks.rb", __dir__)
+      _output, error, status = Open3.capture3(config.fetch("env"), RbConfig.ruby, script, manifest, destination)
+      expect(status.success?).to be(true), error
+      result = JSON.parse(File.read(destination)).first
+      expect(result.fetch("blocked")).to include("exceeded")
+      expect(result.fetch("partial").fetch("seconds")).to be >= 0.1
+      expect(result).not_to have_key("full_median_seconds")
+      expect(File.read(File.join(directory, "comparison-logs/cold-0.stdout"))).to include('"killed":1')
+      expect(File.read(File.join(directory, "source.rb"))).to eq("42\n")
+    end
+  end
+
   it "records three independent cold and edited pairs and restores the source" do
     Dir.mktmpdir("ripr-comparison") do |directory|
       source = "def answer; 42; end\n"
