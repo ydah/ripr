@@ -72,7 +72,7 @@ module Ripr
         @mutants
       end
 
-      def call
+      def call(&)
         previous_ripr = ENV.fetch("RIPR", nil)
         plan unless @planned
         selected = select_mutants(@mutants)
@@ -90,7 +90,8 @@ module Ripr
         @cache = ResultCache.new(@config, sources: @sources, test_files: @test_files, framework: @framework, mutants: @mutants,
                                           test_ids: adapter.tests.map { |test| test.fetch("id") })
         prepare_baseline(adapter, load_reached)
-        results = Scheduler.new(@config, @baseline, @table, @cache, warnings: @warnings, metrics: @metrics).call(selected, adapter)
+        scheduler = Scheduler.new(@config, @baseline, @table, @cache, warnings: @warnings, metrics: @metrics)
+        results = scheduler.call(selected, adapter, &)
         @cache.write(results, @baseline, @metrics)
         results
       ensure

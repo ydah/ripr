@@ -5,6 +5,17 @@ require "ripr/engine/child" if File.file?(File.expand_path("../lib/ripr/engine/c
 require "ripr/core/classifier" if File.file?(File.expand_path("../lib/ripr/core/classifier.rb", __dir__))
 
 RSpec.describe "mutation execution" do
+  it "reports worker progress from the parent as each task finishes" do
+    updates = []
+    parent = Process.pid
+    results = Ripr::Engine::Child.batch([1, 2], jobs: 2, timeout: ->(_) { 1000 },
+                                                on_complete: ->(done, total) { updates << [Process.pid, done, total] }) do |task|
+      { "value" => task }
+    end
+    expect(results.map(&:first).sort).to eq([1, 2])
+    expect(updates).to eq([[parent, 0, 2], [parent, 1, 2], [parent, 2, 2]])
+  end
+
   it "isolates state and drains results larger than a pipe buffer" do
     result = Ripr::Engine::Child.call(timeout_ms: 1000) { { "value" => "x" * 200_000 } }
     expect(result.fetch("value").size).to eq(200_000)

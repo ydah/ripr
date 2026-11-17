@@ -18,12 +18,15 @@ module Ripr
         @previous = config[:full] ? {} : @snapshot.read
         @source_hash = digest(sources.sort.to_h.transform_values { |source| Digest::SHA256.hexdigest(source) })
         @test_hashes = test_files.sort.to_h { |path| [path, Digest::SHA256.file(path).hexdigest] }
-        auxiliary = (Dir.glob("{test,spec}/**/*") + %w[Gemfile.lock .rspec]).uniq.select do |path|
+        lockfiles = %w[Gemfile.lock .rspec]
+        lockfiles << Bundler.default_lockfile.to_s if defined?(Bundler) && ENV["BUNDLE_GEMFILE"]
+        auxiliary = (Dir.glob("{test,spec}/**/*") + lockfiles).uniq.select do |path|
           File.file?(path) && !test_files.include?(path)
         end
         dependencies = auxiliary.sort.to_h { |path| [path, Digest::SHA256.file(path).hexdigest] }
         settings = config.to_h.slice(:operators, :arid_callees, :tests, :samples, :seed)
-        @baseline_env_hash = digest([VERSION, RUBY_ENGINE, RUBY_VERSION, Prism::VERSION, framework, settings, @source_hash, dependencies])
+        @baseline_env_hash = digest([VERSION, RUBY_ENGINE, RUBY_VERSION, RUBY_PLATFORM, Dir.pwd,
+                                     Prism::VERSION, framework, settings, @source_hash, dependencies])
         @env_hash = digest([@baseline_env_hash, @test_hashes, test_ids.sort, config[:timeout], config[:jobs], config[:verify_not_infected]])
       end
 

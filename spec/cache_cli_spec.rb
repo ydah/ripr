@@ -9,6 +9,7 @@ require "yaml"
 require "prism"
 require "ripr/engine/result_cache"
 require "ripr/config"
+require "bundler"
 
 RSpec.describe "incremental ripr commands" do
   let(:executable) { File.expand_path("../exe/ripr", __dir__) }
@@ -311,6 +312,59 @@ RSpec.describe "incremental ripr commands" do
         expect(unchanged.result_for(mutant)).not_to be_nil
         changed = Ripr::Engine::ResultCache.new(config, **arguments, test_ids: ["SampleTest#old", "SampleTest#new"])
         expect(changed.result_for(mutant)).to be_nil
+      end
+    end
+  end
+
+  it "invalidates a copied cache when the checkout path changes program behavior" do
+    Dir.mktmpdir("ripr-path-cache") do |temporary|
+      base = File.realpath(temporary)
+      first = File.join(base, "long-checkout-name")
+      second = File.join(base, "x")
+      FileUtils.mkdir_p(first)
+      FileUtils.mkdir_p(second)
+      FileUtils.cp_r(File.join(fixture, "."), first)
+      threshold = File.join(second, "lib").length
+      File.write(File.join(first, "lib/sample.rb"), "module Sample; def self.check; __dir__.length >= #{threshold}; end; end\n")
+      File.write(File.join(first, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+        class PathTest < Minitest::Test
+          def test_path
+            assert Sample.check
+          end
+        end
+      RUBY
+      report, = command(first)
+      expect(report.fetch("summary").fetch("not_infected")).to eq(1)
+      FileUtils.cp_r(File.join(first, "."), second)
+      report, = command(second)
+      expect(report.fetch("summary").fetch("killed")).to eq(1)
+      expect(snapshot(second).fetch("metrics").fetch("reused")).to eq(0)
+    end
+  end
+
+  it "invalidates results when the active bundle lockfile outside the project changes" do
+    Dir.mktmpdir("ripr-bundle") do |bundle_directory|
+      gemfile = File.join(bundle_directory, "AlternateGemfile")
+      lockfile = "#{gemfile}.lock"
+      File.write(gemfile, "source 'https://rubygems.org'\n")
+      File.write(lockfile, "original bundle\n")
+      allow(ENV).to receive(:[]).and_call_original
+      allow(ENV).to receive(:[]).with("BUNDLE_GEMFILE").and_return(gemfile)
+      allow(Bundler).to receive(:default_lockfile).and_return(Pathname.new(lockfile))
+      with_project do |directory|
+        Dir.chdir(directory) do
+          config = Ripr::Config.load({ operators: ["comparison"] })
+          mutant = { "id" => "sample", "full_id" => "sample::comparison", "method_hash" => "method" }
+          arguments = { sources: { "lib/sample.rb" => File.read("lib/sample.rb") }, test_files: ["test/sample_test.rb"],
+                        framework: "minitest", mutants: [mutant], test_ids: ["SampleTest#test"] }
+          cache = Ripr::Engine::ResultCache.new(config, **arguments)
+          cache.write([mutant.merge("status" => "not_infected", "observed" => [], "covering_tests" => [])], {}, {})
+          expect(Ripr::Engine::ResultCache.new(config, **arguments).result_for(mutant)).not_to be_nil
+          File.write(lockfile, "updated bundle\n")
+          expect(Ripr::Engine::ResultCache.new(config, **arguments).result_for(mutant)).to be_nil
+        end
       end
     end
   end

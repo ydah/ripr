@@ -9,10 +9,11 @@ module Ripr
         batch([nil], jobs: 1, timeout: ->(_) { timeout_ms }) { block.call }.first.last
       end
 
-      def self.batch(tasks, jobs:, timeout:, &)
+      def self.batch(tasks, jobs:, timeout:, on_complete: nil, &)
         pending = tasks.dup
         active = {}
         completed = []
+        on_complete&.call(0, tasks.length)
         until pending.empty? && active.empty?
           while active.length < jobs && !pending.empty?
             task = pending.shift
@@ -33,6 +34,7 @@ module Ripr
             completed << [state.fetch(:task), payload]
             active.delete(state.fetch(:reader))
             state.fetch(:reader).close
+            on_complete&.call(completed.length, tasks.length)
           end
         end
         completed

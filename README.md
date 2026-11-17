@@ -122,7 +122,7 @@ v0.1 targets pure Ruby libraries. It requires `fork` and CRuby's instruction-seq
 
 Class-body and top-level expressions are static and excluded. `define_method` blocks, non-`self` singleton receivers, and detached heredoc interpolation sites are excluded with diagnostics. Unevaluated `defined?` operands are left intact. Source files are never rewritten.
 
-Tests should be deterministic and independent. Shared test state, time, unseeded randomness, and thread ordering can invalidate cached observations; use `--full` when investigating. Unowned thread activity conservatively selects all tests. Ractor, Windows, JRuby, TruffleRuby, and complete Rails integration are outside this release's scope. Code depending on exact call-stack depth may require exclusion.
+Tests should be deterministic and independent. Shared test state, time, unseeded randomness, and thread ordering can invalidate cached observations; use `--full` when investigating. Activity outside a tracked test conservatively selects all tests and adds a report note: mutation switching cannot change effects already computed during loading. Ractor, Windows, JRuby, TruffleRuby, and complete Rails integration are outside this release's scope. Code depending on exact call-stack depth may require exclusion.
 
 ## Development
 

@@ -96,7 +96,13 @@ module Ripr
 
       runner = Engine::Runner.new(config, @arguments)
       runner.plan
-      results = command == "list" ? runner.mutants.map { |m| m.merge("status" => "planned") } : runner.call
+      results = if command == "list"
+                  runner.mutants.map { |m| m.merge("status" => "planned") }
+                else
+                  runner.call do |done, total|
+                    @stderr.print "\rripr: mutation workers #{done}/#{total}#{"\n" if done == total}" if @stderr.tty?
+                  end
+                end
       runner.warnings.each { |message| @stderr.puts "ripr: #{message}" }
       summary = Reporters.write(results, runner, config, stdout: @stdout)
       return 0 if config[:dry_run] || command == "list"

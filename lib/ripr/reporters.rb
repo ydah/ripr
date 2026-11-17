@@ -3,6 +3,7 @@
 require "json"
 require "cgi"
 require "fileutils"
+require "pathname"
 require_relative "core/classifier"
 
 module Ripr
@@ -13,6 +14,8 @@ module Ripr
       "not_infected" => "Add boundary inputs that change the mutated expression's value.",
       "not_detected" => "Assert the changed return value or side effect. Accept only if the mutation is equivalent."
     }.freeze
+    LOAD_NOTE = "Reached outside a tracked test, possibly during loading or in a background thread. " \
+                "Switching cannot change effects already computed before test execution."
     MTE_STATUSES = { "killed" => "Killed", "timeout" => "Timeout", "error" => "RuntimeError", "not_reached" => "NoCoverage",
                      "not_infected" => "Survived", "not_detected" => "Survived", "accepted" => "Ignored",
                      "static" => "Ignored", "invalid" => "CompileError", "planned" => "Pending" }.freeze
@@ -26,7 +29,9 @@ module Ripr
         hint = HINTS.fetch(status)
         observed = mutant.fetch("observed", [])
         hint += " Observed operands: #{JSON.generate(observed)}." if status == "not_infected" && !observed.empty?
-        mutant.slice("id", "full_id", "location", "subject", "operator", "original", "mutated", "observed", "covering_tests")
+        hint += " #{LOAD_NOTE}" if mutant["load_reached"]
+        mutant.slice("id", "full_id", "location", "subject", "operator", "original", "mutated", "observed", "covering_tests",
+                     "load_reached")
               .merge("kind" => status, "action" => ACTIONS.fetch(status), "hint" => hint,
                      "rerun" => "ripr --only #{id}", "accept" => "ripr accept #{id} --reason \"...\"")
       end
@@ -37,8 +42,10 @@ module Ripr
       files = sources.to_h do |path, source|
         mutants = results.select { |m| m.fetch("location").fetch("file") == path }.map do |mutant|
           location = mutant.fetch("location")
+          reason = mutant["accepted"] || mutant.fetch("status")
+          reason += ". #{LOAD_NOTE}" if mutant["load_reached"]
           { "id" => mutant.fetch("id"), "mutatorName" => mutant.fetch("operator"), "replacement" => mutant.fetch("mutated"),
-            "status" => MTE_STATUSES.fetch(mutant.fetch("status")), "statusReason" => mutant["accepted"] || mutant.fetch("status"),
+            "status" => MTE_STATUSES.fetch(mutant.fetch("status")), "statusReason" => reason,
             "location" => { "start" => { "line" => location.fetch("line"), "column" => location.fetch("column") },
                             "end" => { "line" => location.fetch("end_line"), "column" => location.fetch("end_column") } } }
         end
@@ -65,6 +72,7 @@ module Ripr
             stdout.puts "#{mutant['status'].tr('_', ' ')} #{location['file']}:#{location['line']}:#{location['column']} " \
                         "#{mutant['original'].inspect} → #{mutant['mutated'].inspect} id=#{mutant['id']}"
             stdout.puts "  observed: #{JSON.generate(mutant['observed'])}" unless mutant.fetch("observed", []).empty?
+            stdout.puts "  #{LOAD_NOTE}" if mutant["load_reached"]
           end
         when "agent"
           stdout.puts JSON.generate(agent(results, run, summary))
@@ -73,8 +81,14 @@ module Ripr
             next unless ACTIONS.key?(mutant["status"])
 
             location = mutant.fetch("location")
-            file = annotation(location.fetch("file"), property: true)
-            message = annotation("#{mutant['original']} → #{mutant['mutated']}")
+            path = location.fetch("file")
+            if ENV["GITHUB_WORKSPACE"]
+              path = Pathname.new(File.expand_path(path)).relative_path_from(Pathname.new(ENV.fetch("GITHUB_WORKSPACE"))).to_s
+            end
+            file = annotation(path, property: true)
+            message = "#{mutant['original']} → #{mutant['mutated']}"
+            message += ". #{LOAD_NOTE}" if mutant["load_reached"]
+            message = annotation(message)
             stdout.puts "::warning file=#{file},line=#{location['line']},col=#{location['column']}," \
                         "title=ripr #{mutant['status']}::#{message}"
           end

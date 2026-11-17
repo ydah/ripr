@@ -33,6 +33,7 @@
           "kind": {"enum": ["not_reached", "not_infected", "not_detected"]},
           "action": {"enum": ["add_test", "add_input", "strengthen_assertion"]},
           "hint": {"type": "string"},
+          "load_reached": {"type": "boolean"},
           "location": {
             "type": "object",
             "required": ["file", "line", "column"],

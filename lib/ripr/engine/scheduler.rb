@@ -14,7 +14,7 @@ module Ripr
         @metrics = metrics
       end
 
-      def call(selected, adapter)
+      def call(selected, adapter, &progress)
         probe = @baseline.fetch("probe")
         ready = []
         results = selected.filter_map do |mutant|
@@ -27,14 +27,15 @@ module Ripr
                    elsif mutant["mode"] == "value" && infect.empty? && !unknown_reach
                      "not_infected"
                    end
-          data = mutant.merge("observed" => probe.fetch("samples").fetch(mutant.fetch("site"), []),
+          data = mutant.merge("load_reached" => unknown_reach,
+                              "observed" => probe.fetch("samples").fetch(mutant.fetch("site"), []),
                               "covering_tests" => reach.filter_map { |id| @baseline.fetch("tests")[id]&.merge("id" => id) })
           cached = @cache.result_for(mutant) unless %w[accepted invalid].include?(status)
           verify = %w[not_reached not_infected].include?(status) &&
                    (!@config[:only].empty? || (@config[:verify_not_infected] && status == "not_infected"))
           if cached
             @metrics["reused"] += 1
-            cached
+            cached.merge("load_reached" => unknown_reach)
           elsif status && !verify
             data.merge("status" => status)
           else
@@ -54,7 +55,7 @@ module Ripr
           mutant.fetch("test_ids").sum { |id| @baseline.fetch("tests").fetch(id).fetch("duration_ms") }
         end
         timeout = ->(mutant) { @config[:timeout].fetch("base_ms") + (@config[:timeout].fetch("factor") * cost.call(mutant)) }
-        completed = Child.batch(ready.sort_by(&cost), jobs: @config[:jobs], timeout: timeout) do |mutant|
+        completed = Child.batch(ready.sort_by(&cost), jobs: @config[:jobs], timeout: timeout, on_complete: progress) do |mutant|
           site_ids = @table.fetch(mutant.fetch("site"))
           R.activate(mutant.fetch("site"), site_ids.index(mutant.fetch("id")) + 1)
           adapter.run(mutant.fetch("test_ids"), fail_fast: true)

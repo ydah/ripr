@@ -72,6 +72,28 @@ RSpec.describe "ripr command" do
     end
   end
 
+  it "kills arithmetic mutations when tests catch an exception from the original operator" do
+    Dir.mktmpdir("ripr-exception") do |dir|
+      FileUtils.mkdir_p(File.join(dir, "lib"))
+      FileUtils.mkdir_p(File.join(dir, "test"))
+      File.write(File.join(dir, "lib/sample.rb"), "module Sample; def self.divide(n, d); n / d; end; end\n")
+      File.write(File.join(dir, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+        class DivideTest < Minitest::Test
+          def test_zero_divisor
+            assert_raises(ZeroDivisionError) { Sample.divide(4, 0) }
+          end
+        end
+      RUBY
+      _, stderr, status = command("--full", directory: dir)
+      expect(status.exitstatus).to eq(0), stderr
+      snapshot = JSON.parse(File.read(File.join(dir, ".ripr/snapshot.json")))
+      arithmetic = snapshot.fetch("mutants").values.find { |mutant| mutant["operator"] == "arithmetic" }
+      expect(arithmetic.fetch("status")).to eq("killed")
+    end
+  end
+
   it "initializes configuration and the bundled skill without overwriting changes" do
     Dir.mktmpdir("ripr-init") do |dir|
       _, stderr, status = command("init", directory: dir)
@@ -104,6 +126,40 @@ RSpec.describe "ripr command" do
       expect(status.exitstatus).to eq(0), stderr
       expect(JSON.parse(File.read(File.join(dir, "mutation.json"))).fetch("schemaVersion")).to eq("2")
       expect(File.read(File.join(dir, "index.html"))).to include("ripr mutation report")
+    end
+  end
+
+  it "uses workspace-relative annotation paths when run in a nested project" do
+    workspace = File.expand_path("..", __dir__)
+    output, stderr, status = command("--reporter", "github", "--full", env: { "GITHUB_WORKSPACE" => workspace })
+    expect(status.exitstatus).to eq(0), stderr
+    expect(output).to include("::warning file=test/fixtures/projects/minitest_basic/lib/sample.rb,")
+  end
+
+  it "annotates sites that ran while loading and cannot change existing load-time effects" do
+    Dir.mktmpdir("ripr-load-reach") do |dir|
+      FileUtils.mkdir_p(File.join(dir, "lib"))
+      FileUtils.mkdir_p(File.join(dir, "test"))
+      File.write(File.join(dir, "lib/sample.rb"), <<~RUBY)
+        module Sample
+          def self.adult?(age); age >= 18; end
+          ADULT = adult?(20)
+        end
+      RUBY
+      File.write(File.join(dir, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+        class LoadTest < Minitest::Test
+          def test_constant
+            assert Sample::ADULT
+          end
+        end
+      RUBY
+      output, stderr, status = command("--reporter", "agent", "--operators", "comparison", "--full", directory: dir)
+      expect(status.exitstatus).to eq(0), stderr
+      gap = JSON.parse(output).fetch("gaps").first
+      expect(gap.fetch("load_reached")).to be(true)
+      expect(gap.fetch("hint")).to include("during loading")
     end
   end
 
