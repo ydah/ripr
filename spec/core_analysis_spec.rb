@@ -22,6 +22,12 @@ RSpec.describe "Core source analysis" do
     expect(result.fetch(:warnings).join).to include("lib/example.rb")
   end
 
+  it "leaves unevaluated defined? operands out of the runtime mutation plan" do
+    result = analyze("def value; defined?(true) || defined?(1 >= 0); end", operators: %w[boolean_literal integer_literal comparison])
+    expect(result.fetch(:sites)).to be_empty
+    expect(result.fetch(:mutants)).to be_empty
+  end
+
   it "maps every comparison and arithmetic operator to its default replacement" do
     expected = { ">=" => ">", ">" => ">=", "<=" => "<", "<" => "<=", "==" => "!=", "!=" => "==",
                  "+" => "-", "-" => "+", "*" => "/", "/" => "*", "%" => "*" }

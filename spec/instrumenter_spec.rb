@@ -187,4 +187,11 @@ RSpec.describe "source instrumentation" do
     expect(analysis.fetch(:mutants)).to be_empty
     expect(analysis.fetch(:warnings).join).to include("define_method", "singleton receiver")
   end
+
+  it "preserves the syntax and method-presence semantics of defined? operands" do
+    source = "def self.run(value); [defined?(true), defined?(1), defined?(value >= 18)]; end"
+    scope, analysis, = evaluate(source, operators: %w[boolean_literal integer_literal comparison])
+    expect(scope.run(Object.new)).to eq(["true", "expression", nil])
+    expect(analysis.fetch(:mutants)).to be_empty
+  end
 end

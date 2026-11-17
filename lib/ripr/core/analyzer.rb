@@ -84,6 +84,8 @@ module Ripr
 
       def walk(node, ast_path, context, depth)
         return if unsupported?(node)
+        # defined? inspects its operand's syntax without evaluating it.
+        return if node.is_a?(Prism::DefinedNode)
 
         return discover(node, context[:subject].split(/[.#]/).first.split("::"), false) if node.is_a?(Prism::DefNode)
 
