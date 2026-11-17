@@ -1,0 +1,15 @@
+AllCops:
+  TargetRubyVersion: 3.3
+  NewCops: enable
+  Exclude:
+    - vendor/**/*
+    - test/fixtures/**/*
+
+Style/Documentation:
+  Enabled: false
+Style/StringLiterals:
+  EnforcedStyle: double_quotes
+Metrics:
+  Enabled: false
+Layout/LineLength:
+  Max: 140

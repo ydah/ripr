@@ -4,5 +4,5 @@ require_relative "ripr/version"
 
 module Ripr
   class Error < StandardError; end
-  # Your code goes here...
+  class BaselineFailure < Error; end
 end
