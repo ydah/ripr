@@ -216,4 +216,111 @@ RSpec.describe "Core source analysis" do
     source = "def value\n # ripr:disable-next-line\n 1\nend\n"
     expect(analyze(source).fetch(:mutants).map { |mutant| mutant.fetch(:accepted) }.uniq).to eq(["inline disable"])
   end
+
+  it "records exact one-based span columns and the documented short identity" do
+    source = "def value(x)\n  x >= 18\nend\n"
+    mutant = analyze(source, operators: ["comparison"]).fetch(:mutants).first
+    expect(mutant.fetch(:full_id)).to eq("lib/example.rb::Object#value::body.body.0::comparison::>")
+    expect(mutant.fetch(:id)).to eq(Digest::SHA256.hexdigest(mutant.fetch(:full_id)).slice(0, 10))
+    expect(mutant.fetch(:location)).to eq(file: "lib/example.rb", line: 2, column: 3, end_line: 2, end_column: 10)
+  end
+
+  it "marks statement removal invalid when it leaves an undefined pinned pattern variable" do
+    source = "def value(input)\n  pinned = 1\n  input in ^pinned\nend\n"
+    expect(Prism.parse(source)).to be_success
+    mutant = analyze(source, operators: ["statement_removal"]).fetch(:mutants).first
+    expect(mutant.fetch(:original)).to eq("pinned = 1")
+    expect(mutant.fetch(:invalid)).to be(true)
+  end
+
+  it "recognizes arid calls inside nested statements" do
+    source = "def value; result = wrap(logger.info(:message)); compute; 1; end"
+    result = analyze(source, operators: ["statement_removal"])
+    expect(result.fetch(:mutants).map { |mutant| mutant.fetch(:original) }).to eq(["compute"])
+  end
+
+  it "distinguishes top-level instance and singleton methods" do
+    result = analyze("def instance_value; 1; end\ndef self.singleton_value; 1; end")
+    expect(result.fetch(:mutants).map { |mutant| mutant.fetch(:subject) }.uniq).to eq(["Object#instance_value", "Object.singleton_value"])
+  end
+
+  it "reports the unsupported receiver for an isolated singleton definition" do
+    result = analyze("def object.value; 1; end")
+    expect(result.fetch(:mutants)).to be_empty
+    expect(result.fetch(:warnings)).to eq(["lib/example.rb:1: skipped unsupported singleton receiver"])
+  end
+
+  it "gives a nested def its own instance subject" do
+    source = "class Example; def outer; def inner; 1; end; end; end"
+    expect(analyze(source).fetch(:mutants).map { |mutant| mutant.fetch(:subject) }.uniq).to eq(["Example#inner"])
+  end
+
+  it "skips define_method blocks encountered inside an ordinary method" do
+    result = analyze("def outer; define_method(:inner) { 1 }; end", operators: ["integer_literal"])
+    expect(result.fetch(:mutants)).to be_empty
+    expect(result.fetch(:warnings)).to eq(["lib/example.rb:1: skipped unsupported define_method block"])
+  end
+
+  it "plans removal of every non-final ordinary statement" do
+    result = analyze("def value; first; second; third; end", operators: ["statement_removal"])
+    expect(result.fetch(:mutants).map { |mutant| mutant.fetch(:original) }).to eq(%w[first second])
+  end
+
+  it "generates both original and replacement binary expressions and preserves operand newlines" do
+    source = "def value(left, right)\n  left >=\n    right\nend\n"
+    result = analyze(source, operators: ["comparison"])
+    rewritten = instrument(source, result)
+    expect(rewritten.fetch(:invalid)).to be_empty
+    expect(rewritten.fetch(:site_table).keys).to eq(result.fetch(:sites).map { |site| site.fetch(:key) })
+    expect(rewritten.fetch(:code)).to include("__ripr_k == 0 ? __ripr_l >= __ripr_r", "__ripr_l > __ripr_r")
+    expect(rewritten.fetch(:code).count("\n")).to eq(source.count("\n"))
+  end
+
+  it "retains both operands in the switched connector branch" do
+    source = "def value(left, right); left && right; end"
+    rewritten = instrument(source, analyze(source, operators: ["boolean_connector"]))
+    expect(rewritten.fetch(:code)).to include("((left) || (right))", "(left && right)")
+  end
+
+  it "isolates one invalid site out of exactly two candidates" do
+    source = "def value(left, right); [1i, left >= right]; end"
+    result = analyze(source, operators: %w[integer_literal comparison])
+    expect(result.fetch(:sites).length).to eq(2)
+    rewritten = instrument(source, result)
+    comparison = result.fetch(:sites).find { |site| site.fetch(:operator) == "comparison" }
+    expect(rewritten.fetch(:site_table).keys).to eq([comparison.fetch(:key)])
+    expect(rewritten.fetch(:warnings)).to eq(["lib/example.rb: excluded 1 unsupported instrumentation sites"])
+  end
+
+  it "omits unreachable heredoc interpolation sites from the runtime table" do
+    source = <<~'RUBY'
+      def value(input)
+        text = <<~TEXT
+          #{input >= 18}
+        TEXT
+        text
+      end
+    RUBY
+    result = analyze(source, operators: ["comparison"])
+    expect(result.fetch(:sites).length).to eq(1)
+    rewritten = instrument(source, result)
+    expect(rewritten.fetch(:site_table)).to be_empty
+    expect(rewritten.fetch(:invalid)).to eq(result.fetch(:mutants).map { |mutant| mutant.fetch(:id) })
+    expect(rewritten.fetch(:warnings)).to eq(["lib/example.rb: excluded 1 unsupported instrumentation sites"])
+    expect(rewritten.fetch(:code)).to eq(source)
+  end
+
+  it "keeps unary operators outside the binary mutation interface" do
+    source = "def value(input); [-input, +input, !input, ~input]; end"
+    expect(Prism.parse(source)).to be_success
+    expect(analyze(source, operators: %w[comparison arithmetic]).fetch(:mutants)).to be_empty
+  end
+
+  it "refuses malformed recorded test maps before cache reuse" do
+    mutant = { "id" => "abc", "full_id" => "full", "method_hash" => "method" }
+    record = mutant.merge("status" => "killed", "env_hash" => "env")
+    [nil, [], "spec/example_spec.rb"].each do |tests|
+      expect(Ripr::Core::ReusePlanner.reusable?(record.merge("tests" => tests), mutant, env_hash: "env", test_hashes: {})).to be(false)
+    end
+  end
 end
