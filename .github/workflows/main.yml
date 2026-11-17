@@ -45,6 +45,12 @@ jobs:
         run: bundle exec rspec spec/cli_spec.rb
       - name: Build gem
         run: gem build ripr.gemspec
+      - name: Exercise the composite action and annotations
+        if: matrix.ruby == '4.0' && matrix.os == 'ubuntu-latest'
+        uses: ./
+        with:
+          path: test/fixtures/projects/minitest_basic
+          since: ''
       - name: Apply ripr to its Core
         if: matrix.ruby == '4.0' && matrix.os == 'ubuntu-latest'
         continue-on-error: true
