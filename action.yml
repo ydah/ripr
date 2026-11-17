@@ -1,0 +1,37 @@
+name: ripr mutation tests
+description: Run diff-driven Ruby mutation tests and annotate surviving mutants.
+inputs:
+  path:
+    description: Project directory, with Ruby and bundle already installed.
+    default: .
+  since:
+    description: Git reference used to select changed source lines; requires checkout fetch-depth 0.
+    default: origin/main
+  fail-on-survived:
+    description: Fail when selected mutants survive.
+    default: 'false'
+  threshold:
+    description: Optional minimum mutation score.
+    default: ''
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: ${{ inputs.path }}/.ripr
+        key: ${{ runner.os }}-ripr-${{ github.ref_name }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-ripr-${{ github.ref_name }}-
+          ${{ runner.os }}-ripr-
+    - shell: bash
+      working-directory: ${{ inputs.path }}
+      env:
+        RIPR_ACTION_SINCE: ${{ inputs.since }}
+        RIPR_ACTION_FAIL: ${{ inputs.fail-on-survived }}
+        RIPR_ACTION_THRESHOLD: ${{ inputs.threshold }}
+      run: |
+        args=(--reporter text --reporter github)
+        if [[ -n "$RIPR_ACTION_SINCE" ]]; then args+=(--since "$RIPR_ACTION_SINCE"); fi
+        if [[ "$RIPR_ACTION_FAIL" == 'true' ]]; then args+=(--fail-on-survived); fi
+        if [[ -n "$RIPR_ACTION_THRESHOLD" ]]; then args+=(--threshold "$RIPR_ACTION_THRESHOLD"); fi
+        bundle exec ripr "${args[@]}"

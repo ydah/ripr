@@ -180,4 +180,11 @@ RSpec.describe "source instrumentation" do
     expect(analysis.fetch(:mutants).map { |m| m[:subject] }).to eq(["A::B::C.run"])
     expect(analysis.fetch(:warnings).join).to include("singleton receiver")
   end
+
+  it "reports define_method blocks and dynamic singleton classes as unsupported" do
+    source = "class A; define_method(:run) { |x| x >= 18 }; class << Object.new; def run(x); x >= 18; end; end; end"
+    analysis, = instrument(source)
+    expect(analysis.fetch(:mutants)).to be_empty
+    expect(analysis.fetch(:warnings).join).to include("define_method", "singleton receiver")
+  end
 end

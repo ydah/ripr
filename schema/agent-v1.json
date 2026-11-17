@@ -1,0 +1,73 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ripr.agent/v1",
+  "type": "object",
+  "required": ["schema", "run", "summary", "gaps"],
+  "properties": {
+    "schema": {"const": "ripr.agent/v1"},
+    "run": {
+      "type": "object",
+      "required": ["since", "scope", "framework"],
+      "properties": {
+        "since": {"type": ["string", "null"]},
+        "scope": {"enum": ["node", "method"]},
+        "framework": {"enum": ["minitest", "rspec", null]}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["killed", "timeout", "error", "not_reached", "not_infected", "not_detected", "accepted", "score"],
+      "properties": {
+        "score": {"type": "number", "minimum": 0, "maximum": 100}
+      },
+      "additionalProperties": {"type": "number", "minimum": 0}
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "full_id", "kind", "action", "hint", "location", "subject", "operator", "original", "mutated", "observed", "covering_tests", "rerun", "accept"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-f0-9]{10}$"},
+          "full_id": {"type": "string"},
+          "kind": {"enum": ["not_reached", "not_infected", "not_detected"]},
+          "action": {"enum": ["add_test", "add_input", "strengthen_assertion"]},
+          "hint": {"type": "string"},
+          "location": {
+            "type": "object",
+            "required": ["file", "line", "column"],
+            "properties": {
+              "file": {"type": "string"},
+              "line": {"type": "integer", "minimum": 1},
+              "column": {"type": "integer", "minimum": 1}
+            }
+          },
+          "subject": {"type": "string"},
+          "operator": {"type": "string"},
+          "original": {"type": "string"},
+          "mutated": {"type": "string"},
+          "observed": {"type": "array", "maxItems": 3, "items": {"type": "array"}},
+          "covering_tests": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "file", "line"],
+              "properties": {
+                "id": {"type": "string"},
+                "file": {"type": "string"},
+                "line": {"type": "integer", "minimum": 1}
+              }
+            }
+          },
+          "rerun": {"type": "string"},
+          "accept": {"type": "string"}
+        },
+        "allOf": [
+          {"if": {"properties": {"kind": {"const": "not_reached"}}}, "then": {"properties": {"action": {"const": "add_test"}}}},
+          {"if": {"properties": {"kind": {"const": "not_infected"}}}, "then": {"properties": {"action": {"const": "add_input"}}}},
+          {"if": {"properties": {"kind": {"const": "not_detected"}}}, "then": {"properties": {"action": {"const": "strengthen_assertion"}}}}
+        ]
+      }
+    }
+  }
+}

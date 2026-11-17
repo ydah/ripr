@@ -1,0 +1,14 @@
+[
+  {"subject":"Sample.adult?","operator":"comparison","replacement":">","status":"not_infected"},
+  {"subject":"Sample.adult?","operator":"integer_literal","replacement":"0","status":"killed"},
+  {"subject":"Sample.adult?","operator":"integer_literal","replacement":"17","status":"not_detected"},
+  {"subject":"Sample.adult?","operator":"integer_literal","replacement":"19","status":"not_detected"},
+  {"subject":"Sample.adult?","operator":"return_nil","replacement":"nil","status":"killed"},
+  {"subject":"Sample.discount","operator":"arithmetic","replacement":"/","status":"not_detected"},
+  {"subject":"Sample.discount","operator":"condition_negation","replacement":"!","status":"not_detected"},
+  {"subject":"Sample.discount","operator":"return_nil","replacement":"nil","status":"not_detected"},
+  {"subject":"Sample.unused","operator":"arithmetic","replacement":"-","status":"not_reached"},
+  {"subject":"Sample.unused","operator":"integer_literal","replacement":"0","status":"not_reached"},
+  {"subject":"Sample.unused","operator":"integer_literal","replacement":"2","status":"not_reached"},
+  {"subject":"Sample.unused","operator":"return_nil","replacement":"nil","status":"not_reached"}
+]

@@ -12,21 +12,44 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    name: Ruby ${{ matrix.ruby }}
+    runs-on: ${{ matrix.os }}
+    name: Ruby ${{ matrix.ruby }} on ${{ matrix.os }}
     strategy:
       matrix:
         ruby:
+          - '3.3'
+          - '3.4'
           - '4.0'
+        os:
+          - ubuntu-latest
+          - macos-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
       - name: Run the default task
         run: bundle exec rake
+      - name: Check Ruby style
+        if: matrix.ruby == '4.0' && matrix.os == 'ubuntu-latest'
+        run: bundle exec rubocop --cache false
+      - name: Check require loader
+        if: matrix.ruby == '4.0' && matrix.os == 'ubuntu-latest'
+        env:
+          RIPR_LOADER: require
+        run: bundle exec rspec spec/cli_spec.rb
+      - name: Build gem
+        run: gem build ripr.gemspec
+      - name: Apply ripr to its Core
+        if: matrix.ruby == '4.0' && matrix.os == 'ubuntu-latest'
+        continue-on-error: true
+        run: |
+          mkdir -p .ripr
+          bundle exec ruby script/self_mutate.rb --check
+          bundle exec ruby script/self_mutate.rb > .ripr/self-application.json
+          bundle exec ruby -rjson -e 'score = JSON.parse(File.read(".ripr/self-application.json")).fetch("summary").fetch("score"); puts "Core mutation score: #{score}%"; puts "::warning::Core mutation score below 80%: #{score}%" if score < 80'

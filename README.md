@@ -1,39 +1,135 @@
-# Ripr
+# ripr
 
-TODO: Delete this and the text below, and describe your gem
+ripr is a diff-driven mutation test runner for Ruby. It observes values during a baseline run, then runs relevant tests against each mutation to distinguish missing execution, missing inputs, and missing assertions.
 
-Welcome to your new gem! In this directory, you'll find the files you need to be able to package up your Ruby library into a gem. Put your Ruby code in the file `lib/ripr`. To experiment with that code, run `bin/console` for an interactive prompt.
+| Result | What happened | Next step |
+| --- | --- | --- |
+| `not_reached` | No test executed the expression. | Exercise the method and branch. |
+| `not_infected` | Tests reached it, but the mutation never changed its value. | Add a boundary or another input. |
+| `not_detected` | The expression changed, but tests still passed. | Check propagation and strengthen assertions. |
 
-## Installation
+Tests of `age >= 18` using only ages 20 and 10 cannot distinguish it from `age > 18`. ripr reports `not_infected` with observed operands `[[20, 18], [10, 18]]`. Age 18 exposes the missing boundary.
 
-TODO: Replace `UPDATE_WITH_YOUR_GEM_NAME_IMMEDIATELY_AFTER_RELEASE_TO_RUBYGEMS_ORG` with your gem name right after releasing it to RubyGems.org. Please do not do it earlier due to security reasons. Alternatively, replace this section with instructions to install your gem from git if you don't plan to release to RubyGems.org.
+## Try this checkout
 
-Install the gem and add to the application's Gemfile by executing:
+Requires CRuby 3.3 or later on Linux or macOS. Prism is the only runtime gem dependency; the target project supplies Minitest or RSpec.
 
-```bash
-bundle add UPDATE_WITH_YOUR_GEM_NAME_IMMEDIATELY_AFTER_RELEASE_TO_RUBYGEMS_ORG
+```sh
+bundle install
+bundle exec ripr test/fixtures/projects/minitest_basic --reporter agent
+bundle exec rake test
 ```
 
-If bundler is not being used to manage dependencies, install the gem by executing:
+Before the first RubyGems release, add a local checkout to another project's Gemfile:
 
-```bash
-gem install UPDATE_WITH_YOUR_GEM_NAME_IMMEDIATELY_AFTER_RELEASE_TO_RUBYGEMS_ORG
+```ruby
+group :test do
+  gem "ripr", path: "/path/to/ripr", require: false
+end
 ```
 
-## Usage
+Run from the target project root:
 
-TODO: Write usage instructions here
+```sh
+bundle exec ripr init
+bundle exec ripr --since origin/main
+bundle exec ripr --full --fail-on-survived --threshold 80
+bundle exec ripr --framework rspec --tests 'spec/**/*_spec.rb' -j 4
+```
+
+`--since` compares the merge base with staged, unstaged, and untracked source changes. Scores and quality gates cover selected mutations. `--scope node` is the default; `--scope method` selects all mutations in a touched method. `--full` selects the entire target and disables reuse.
+
+## Agent test loop
+
+```sh
+bundle exec ripr init-skill
+bundle exec ripr --since origin/main --reporter agent
+bundle exec ripr --only MUTANT_ID --reporter agent
+bundle exec ripr accept MUTANT_ID --reason "Why the documented behavior makes this equivalent"
+```
+
+The [bundled skill](skills/mutation-test-loop/SKILL.md) guides test changes using the classification. `init-skill` copies it to `.claude/skills/mutation-test-loop`; use `--dir` for another directory. Modified copies require `--force` to overwrite.
+
+Acceptances go into `ripr.accepted.yml`, which belongs in version control. Method changes invalidate acceptances and produce warnings. Inline exclusions are also supported:
+
+```ruby
+value >= limit # ripr:disable-line comparison -- The specification excludes the boundary
+# ripr:disable-next-line integer_literal -- Protocol constant
+code = 42
+```
+
+## Reports and configuration
+
+```sh
+bundle exec ripr --reporter json --reporter html
+bundle exec ripr --reporter text --reporter github
+bundle exec ripr list operators
+bundle exec ripr list mutants
+bundle exec ripr --dry-run --operators comparison,arithmetic
+```
+
+`text` is the default reporter. `agent` writes the [versioned JSON protocol](schema/agent-v1.json) to stdout; loading diagnostics go to stderr. Use one stdout reporter when piping JSON to another program. File reports go to `.ripr/report/`, configurable with `--report-dir`.
+
+`mutation.json` follows mutation-testing-elements schema v2. The interactive HTML viewer needs network access. A static table is available offline.
+
+`.ripr.yml` supports include/exclude globs, framework, tests, scope, jobs, operators, arid callees, thresholds, timeout, and samples. Unknown keys are errors. CLI settings override the file, then defaults; nested timeout and threshold settings merge.
+
+```yaml
+include: [lib/**/*.rb]
+exclude: [lib/**/version.rb]
+framework: auto
+jobs: auto
+operators: default
+thresholds: {high: 80, low: 60, break: null}
+timeout: {factor: 2.0, base_ms: 1000}
+samples: true
+```
+
+The eight default operators cover comparisons, arithmetic, integer and boolean literals, condition negation, boolean connectors, return nil, and statement removal. `return_nil` preserves evaluation and side effects, then discards the returned value. `--no-samples` disables operand observations.
+
+Ignore the `.ripr/` cache directory in Git. Source edits invalidate reuse, while independent test-only edits can reuse part of the baseline. `--only` reruns selected mutations. `--verify-not-infected` runs tests to check that classification.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Completed; requested quality gates passed. |
+| 1 | Invalid arguments or configuration. |
+| 2 | Surviving mutations or score failed a gate. |
+| 3 | Internal execution error. |
+| 4 | Baseline tests failed. |
+
+Timeouts count as detected mutations. Errors remain in the score denominator. Accepted, static, and invalid mutations are excluded.
+
+## CI
+
+Install Ruby and the project's bundle, and fetch history for `merge-base`:
+
+```yaml
+steps:
+  - uses: actions/checkout@v6
+    with:
+      fetch-depth: 0
+  - uses: ruby/setup-ruby@v1
+    with:
+      bundler-cache: true
+  - run: bundle exec ripr --since origin/main --reporter text --reporter github
+```
+
+Add `--fail-on-survived` after establishing a baseline. The [composite action](action.yml) caches `.ripr/` and adds annotations.
+
+## Scope and limitations
+
+v0.1 targets pure Ruby libraries. It requires `fork` and CRuby's instruction-sequence loader. `RIPR_LOADER=require` selects an alternate loader that explicitly rejects wrapped target `load` calls. bootsnap is supported when configured before ripr installs its hook.
+
+Class-body and top-level expressions are static and excluded. `define_method` blocks, non-`self` singleton receivers, and detached heredoc interpolation sites are excluded with diagnostics. Source files are never rewritten.
+
+Tests should be deterministic and independent. Shared test state, time, unseeded randomness, and thread ordering can invalidate cached observations; use `--full` when investigating. Unowned thread activity conservatively selects all tests. Ractor, Windows, JRuby, TruffleRuby, and complete Rails integration are outside this release's scope. Code depending on exact call-stack depth may require exclusion.
 
 ## Development
 
-After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake spec` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
+```sh
+bundle exec rake test
+bundle exec rubocop --cache false
+gem build ripr.gemspec
+```
 
-To install this gem onto your local machine, run `bundle exec rake install`. To release a new version, update the version number in `version.rb`, and then run `bundle exec rake release`, which will create a git tag for the version, push git commits and the created tag, and push the `.gem` file to [rubygems.org](https://rubygems.org).
-
-## Contributing
-
-Bug reports and pull requests are welcome on GitHub at https://github.com/[USERNAME]/ripr.
-
-## License
-
-The gem is available as open source under the terms of the [MIT License](https://opensource.org/licenses/MIT).
+Licensed under the [MIT License](LICENSE.txt).

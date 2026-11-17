@@ -6,6 +6,7 @@ source "https://rubygems.org"
 gemspec
 
 gem "bootsnap", ">= 1.18", require: false
+gem "json_schemer", "~> 2.0", require: false
 gem "minitest", ">= 5", "< 7"
 gem "rake", "~> 13.0"
 gem "rspec", "~> 3.0"

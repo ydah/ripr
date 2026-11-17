@@ -52,6 +52,8 @@ module Ripr
       end
 
       def discover(node, namespace, singleton)
+        return if unsupported?(node)
+
         case node
         when Prism::ClassNode, Prism::ModuleNode
           name = node.constant_path.location.slice
@@ -81,6 +83,8 @@ module Ripr
       end
 
       def walk(node, ast_path, context, depth)
+        return if unsupported?(node)
+
         return discover(node, context[:subject].split(/[.#]/).first.split("::"), false) if node.is_a?(Prism::DefNode)
 
         Operators.for(node).each do |operator, replacement, mode, location|
@@ -106,6 +110,18 @@ module Ripr
       def control?(node)
         %i[return_node break_node next_node redo_node retry_node def_node class_node module_node].include?(node.type) ||
           (node.is_a?(Prism::CallNode) && %i[raise fail].include?(node.name))
+      end
+
+      def unsupported?(node)
+        reason = if node.is_a?(Prism::CallNode) && node.name == :define_method && node.block
+                   "define_method block"
+                 elsif node.is_a?(Prism::SingletonClassNode) && !node.expression.is_a?(Prism::SelfNode)
+                   "singleton receiver"
+                 end
+        return false unless reason
+
+        @warnings << "#{@path}:#{node.location.start_line}: skipped unsupported #{reason}"
+        true
       end
 
       def arid?(node)

@@ -1,0 +1,328 @@
+# frozen_string_literal: true
+
+require "json"
+require "open3"
+require "rbconfig"
+require "tmpdir"
+require "fileutils"
+require "yaml"
+require "prism"
+require "ripr/engine/result_cache"
+
+RSpec.describe "incremental ripr commands" do
+  let(:executable) { File.expand_path("../exe/ripr", __dir__) }
+  let(:fixture) { File.expand_path("../test/fixtures/projects/minitest_basic", __dir__) }
+
+  def with_project
+    Dir.mktmpdir("ripr-cache") do |directory|
+      FileUtils.cp_r(File.join(fixture, "."), directory)
+      cache = File.join(directory, ".ripr")
+      FileUtils.remove_entry(cache) if File.directory?(cache)
+      git(directory, "init", "-q")
+      git(directory, "config", "user.name", "Ripr Test")
+      git(directory, "config", "user.email", "test@example.test")
+      git(directory, "add", "lib", "test")
+      git(directory, "commit", "-qm", "fixture")
+      yield directory
+    end
+  end
+
+  def git(directory, *arguments)
+    output, error, status = Open3.capture3("git", "-C", directory, *arguments)
+    raise error unless status.success?
+
+    output
+  end
+
+  def command(directory, *arguments, expected: 0)
+    output, error, status = Open3.capture3(RbConfig.ruby, executable, "--reporter", "agent", "--operators", "comparison", *arguments,
+                                           chdir: directory)
+    expect(status.exitstatus).to eq(expected), error
+    [output.empty? ? nil : JSON.parse(output), error]
+  end
+
+  def snapshot(directory)
+    JSON.parse(File.read(File.join(directory, ".ripr/snapshot.json")))
+  end
+
+  it "selects changed nodes or their entire method and treats --full as a full run" do
+    with_project do |directory|
+      source_path = File.join(directory, "lib/sample.rb")
+      source = File.read(source_path).sub("age >= 18", "limit = 18\n    age >= limit")
+      File.write(source_path, source)
+      git(directory, "add", "lib/sample.rb")
+      git(directory, "commit", "-qm", "two-line method")
+      File.write(source_path, source.sub("limit = 18", "limit = 19"))
+      report, = command(directory, "--since", "HEAD", "--scope", "node")
+      expect(report.fetch("gaps")).to be_empty
+      expect(report.fetch("summary").fetch("not_reached")).to eq(0)
+      report, = command(directory, "--since", "HEAD", "--scope", "method")
+      expect(report.fetch("gaps").map { |gap| gap.fetch("subject") }).to eq(["Sample.adult?"])
+      report, = command(directory, "--full", "--since", "HEAD", "--scope", "node")
+      expect(report.fetch("gaps").map { |gap| gap.fetch("subject") }).to include("Sample.adult?")
+    end
+  end
+
+  it "selects new source files and validates --only ids" do
+    with_project do |directory|
+      File.write(File.join(directory, "lib/extra file.rb"), "module Extra; def self.adult?(age); age >= 18; end; end\n")
+      report, = command(directory, "--since", "HEAD")
+      expect(report.fetch("gaps").map { |gap| gap.fetch("subject") }).to eq(["Extra.adult?"])
+      _, error = command(directory, "--only", "missing-id", expected: 1)
+      expect(error).to include("unknown mutant")
+    end
+  end
+
+  it "reuses an unchanged baseline and results but verifies an explicit --only request" do
+    with_project do |directory|
+      report, = command(directory)
+      boundary = report.fetch("gaps").find { |gap| gap.fetch("subject") == "Sample.adult?" }
+      expect(snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 2, "reused" => 0)
+      command(directory)
+      expect(snapshot(directory).fetch("metrics")).to include("baseline_reused" => true, "baseline_tests_run" => 0, "reused" => 1)
+      report, = command(directory, "--only", boundary.fetch("id"))
+      expect(report.fetch("gaps").first.fetch("kind")).to eq("not_infected")
+      expect(snapshot(directory).fetch("metrics").fetch("reused")).to eq(0)
+      expect(snapshot(directory).fetch("mutants").fetch(boundary.fetch("full_id"))).to have_key("verified")
+    end
+  end
+
+  it "runs only new tests in the baseline and invalidates a formerly unreached mutation" do
+    with_project do |directory|
+      File.write(File.join(directory, "lib/sample.rb"), <<~RUBY)
+        module Sample
+          def self.adult?(age); age >= 18; end
+          def self.unused(age); age >= 18; end
+        end
+      RUBY
+      File.write(File.join(directory, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+        class SampleTest < Minitest::Test
+          def test_adult
+            assert Sample.adult?(20)
+          end
+        end
+      RUBY
+      command(directory)
+      File.write(File.join(directory, "test/boundary_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+        class BoundaryTest < Minitest::Test
+          def test_unused_boundary
+            assert Sample.unused(18)
+          end
+        end
+      RUBY
+      command(directory)
+      data = snapshot(directory)
+      expect(data.fetch("metrics")).to include("baseline_reused" => true, "baseline_tests_run" => 1, "reused" => 0)
+      unused = data.fetch("mutants").values.find { |mutant| mutant.fetch("subject") == "Sample.unused" }
+      expect(unused.fetch("status")).to eq("killed")
+      expect(data.fetch("baseline").fetch("tests").keys).to include("SampleTest#test_adult", "BoundaryTest#test_unused_boundary")
+      File.unlink(File.join(directory, "test/boundary_test.rb"))
+      command(directory)
+      data = snapshot(directory)
+      unused = data.fetch("mutants").values.find { |mutant| mutant.fetch("subject") == "Sample.unused" }
+      expect(unused.fetch("status")).to eq("not_reached")
+      expect(data.fetch("baseline").fetch("tests").keys).to eq(["SampleTest#test_adult"])
+      observed_left = data.fetch("baseline").fetch("probe").fetch("samples").values.flatten(1).map(&:first)
+      expect(observed_left).not_to include(18)
+    end
+  end
+
+  it "invalidates unchanged caller results when a different target method changes" do
+    with_project do |directory|
+      File.write(File.join(directory, "lib/sample.rb"), <<~RUBY)
+        module Sample
+          def self.limit; 18; end
+          def self.adult?(age); age >= limit; end
+        end
+      RUBY
+      File.write(File.join(directory, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+        class SampleTest < Minitest::Test
+          def test_boundary; assert Sample.adult?(18); end
+        end
+      RUBY
+      command(directory)
+      before = snapshot(directory)
+      expect(before.fetch("mutants").values.first.fetch("status")).to eq("killed")
+      source_path = File.join(directory, "lib/sample.rb")
+      File.write(source_path, File.read(source_path).sub("self.limit; 18", "self.limit; 17"))
+      report, = command(directory)
+      expect(report.fetch("gaps").first.fetch("kind")).to eq("not_infected")
+      after = snapshot(directory)
+      expect(after.fetch("mutants").values.first.fetch("method_hash")).to eq(before.fetch("mutants").values.first.fetch("method_hash"))
+      expect(after.fetch("metrics")).to include("baseline_reused" => false, "baseline_tests_run" => 1, "reused" => 0)
+    end
+  end
+
+  it "retains not_infected when verification succeeds and preserves cache after a failed baseline" do
+    with_project do |directory|
+      report, = command(directory, "--verify-not-infected")
+      expect(report.fetch("gaps").first.fetch("kind")).to eq("not_infected")
+      cache_path = File.join(directory, ".ripr/snapshot.json")
+      previous = File.read(cache_path)
+      File.write(File.join(directory, "test/failing_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        class FailingTest < Minitest::Test
+          def test_failure; flunk "broken baseline"; end
+        end
+      RUBY
+      command(directory, expected: 4)
+      expect(File.read(cache_path)).to eq(previous)
+    end
+  end
+
+  it "applies valid acceptances during planning and warns when their method changes" do
+    with_project do |directory|
+      command(directory)
+      boundary = snapshot(directory).fetch("mutants").values.first
+      ledger = [boundary.slice("full_id", "method_hash").merge("reason" => "Equivalent for the specified domain")]
+      File.write(File.join(directory, "ripr.accepted.yml"), ledger.to_yaml)
+      report, = command(directory)
+      expect(report.fetch("summary").fetch("accepted")).to eq(1)
+      source_path = File.join(directory, "lib/sample.rb")
+      File.write(source_path, File.read(source_path).sub("age >= 18", "age >= 19"))
+      report, error = command(directory)
+      expect(report.fetch("summary").fetch("accepted")).to eq(0)
+      expect(error).to include("stale acceptance")
+    end
+  end
+
+  it "merges RSpec baseline results when a new example file reaches the boundary" do
+    with_project do |directory|
+      FileUtils.remove_entry(File.join(directory, "test"))
+      rspec_fixture = fixture.sub("minitest_basic", "rspec_basic")
+      FileUtils.cp_r(File.join(rspec_fixture, "spec"), File.join(directory, "spec"))
+      command(directory)
+      command(directory)
+      expect(snapshot(directory).fetch("metrics")).to include("baseline_reused" => true, "baseline_tests_run" => 0, "reused" => 1)
+      File.write(File.join(directory, "spec/boundary_spec.rb"), <<~RUBY)
+        require_relative "../lib/sample"
+        RSpec.describe "adult boundary" do
+          it "accepts eighteen" do
+            expect(Sample.adult?(18)).to be(true)
+          end
+        end
+      RUBY
+      command(directory)
+      data = snapshot(directory)
+      expect(data.fetch("metrics")).to include("baseline_reused" => true, "baseline_tests_run" => 1, "reused" => 0)
+      expect(data.fetch("mutants").values.first.fetch("status")).to eq("killed")
+      expect(data.fetch("baseline").fetch("tests").length).to eq(3)
+    end
+  end
+
+  it "rebuilds the baseline after auxiliary test data changes" do
+    with_project do |directory|
+      FileUtils.mkdir_p(File.join(directory, "test/fixtures"))
+      data_path = File.join(directory, "test/fixtures/input.txt")
+      File.write(data_path, "one")
+      command(directory)
+      File.write(data_path, "two")
+      command(directory)
+      expect(snapshot(directory).fetch("metrics")).to include("baseline_reused" => false, "baseline_tests_run" => 2, "reused" => 0)
+    end
+  end
+
+  it "reports a verification discrepancy when externally stateful tests change their outcome" do
+    with_project do |directory|
+      File.write(File.join(directory, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+        class SampleTest < Minitest::Test
+          def test_adult
+            assert Sample.adult?(20)
+            flunk "test depends on prior execution" if File.exist?("external-state")
+            File.write("external-state", "baseline ran")
+          end
+        end
+      RUBY
+      report, error = command(directory, "--verify-not-infected")
+      expect(report.fetch("summary").fetch("killed")).to eq(1)
+      expect(error).to include("verification discrepancy")
+    end
+  end
+
+  it "hashes target source bytes without requiring UTF-8 text" do
+    Dir.mktmpdir("ripr-source-hash") do |directory|
+      Dir.chdir(directory) do
+        config = { full: false, only: [], operators: ["comparison"], arid_callees: [], tests: nil, samples: true,
+                   seed: 0, timeout: {}, jobs: 1, verify_not_infected: false }
+        cache = Ripr::Engine::ResultCache.new(config, sources: { "lib/a.rb" => "\xFF".b }, test_files: [],
+                                                      framework: "minitest", mutants: [])
+        expect(cache.source_hash).to match(/\A[0-9a-f]{64}\z/)
+      end
+    end
+  end
+
+  %w[minitest rspec].each do |framework|
+    it "keeps #{framework} load diagnostics out of agent stdout" do
+      with_project do |directory|
+        test_directory = "test"
+        test_file = "sample_test.rb"
+        if framework == "rspec"
+          FileUtils.remove_entry(File.join(directory, "test"))
+          rspec_fixture = fixture.sub("minitest_basic", "rspec_basic")
+          FileUtils.cp_r(File.join(rspec_fixture, "spec"), File.join(directory, "spec"))
+          test_directory = "spec"
+          test_file = "sample_spec.rb"
+        end
+        source_path = File.join(directory, "lib/sample.rb")
+        File.write(source_path, "STDOUT.write(\"application diagnostic\\n\")\n#{File.read(source_path)}")
+        helper_path = File.join(directory, test_directory, "helper.rb")
+        File.write(helper_path, "puts \"helper diagnostic\"\n")
+        test_path = File.join(directory, test_directory, test_file)
+        File.write(test_path, "puts \"test diagnostic\"\nrequire_relative \"helper\"\n#{File.read(test_path)}")
+        report, error = command(directory)
+        expect(report.fetch("schema")).to eq("ripr.agent/v1")
+        expect(error).to include("application diagnostic", "helper diagnostic", "test diagnostic")
+      end
+    end
+  end
+
+  it "restores stdout when test loading raises" do
+    with_project do |directory|
+      File.write(File.join(directory, "test/sample_test.rb"), "puts 'load diagnostic'; raise 'load failed'\n")
+      script = "require 'ripr/cli'; status = Ripr::CLI.start(['--reporter', 'agent']); STDOUT.write(JSON.generate({'status' => status}))"
+      output, error, status = Open3.capture3(RbConfig.ruby, "-I", File.expand_path("../lib", __dir__), "-e", script, chdir: directory)
+      expect(status.exitstatus).to eq(0), error
+      expect(JSON.parse(output)).to eq("status" => 3)
+      expect(error).to include("load diagnostic", "load failed")
+    end
+  end
+
+  it "ignores damaged nested result and baseline cache data" do
+    with_project do |directory|
+      command(directory)
+      cache_path = File.join(directory, ".ripr/snapshot.json")
+      data = snapshot(directory)
+      original = JSON.generate(data)
+      record_id = data.fetch("mutants").keys.first
+      damage = [
+        ->(copy) { copy.fetch("mutants").fetch(record_id)["covering_tests"] = [1] },
+        ->(copy) { copy.fetch("mutants").fetch(record_id)["covering_tests"] = [{ "id" => "test", "file" => 1, "line" => "one" }] },
+        ->(copy) { copy.fetch("mutants").fetch(record_id)["observed"] = [1] },
+        ->(copy) { copy.fetch("baseline").fetch("tests").values.first["duration_ms"] = -1 },
+        ->(copy) { copy.fetch("baseline").fetch("probe").fetch("reach").values.first << "unknown-test-id" },
+        ->(copy) { copy.fetch("baseline").fetch("probe").fetch("samples").values.first << 1 }
+      ]
+      damage.each do |corrupt|
+        copy = JSON.parse(original)
+        corrupt.call(copy)
+        File.write(cache_path, JSON.generate(copy))
+        report, = command(directory)
+        expect(report.fetch("gaps").first.fetch("kind")).to eq("not_infected")
+        updated = snapshot(directory)
+        if copy.fetch("baseline") == data.fetch("baseline")
+          expect(updated.fetch("metrics").fetch("reused")).to eq(0)
+        else
+          expect(updated.fetch("metrics").fetch("baseline_tests_run")).to eq(2)
+        end
+      end
+    end
+  end
+end
