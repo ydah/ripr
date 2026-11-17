@@ -21,28 +21,40 @@ module CompareBenchmarks
     Process.kill(signal, pid)
   rescue Errno::ESRCH
     nil
+  rescue Errno::EPERM => e
+    raise e.class, "sending #{signal} to PID #{pid}: #{e.message}", e.backtrace
   end
 
   # shortcut: reparented descendants in new groups escape discovery, use OS supervision if complete descendant cleanup is required.
   def kill_tree(pid)
     descendants = [pid]
-    signal_process("STOP", -pid)
-    2.times do
-      output, status = Open3.capture2("ps", "-eo", "pid=,ppid=")
-      raise "Cannot inspect benchmark process tree" unless status.success?
-
-      rows = output.lines.map { |line| line.split.map(&:to_i) }
-      loop do
-        children = rows.filter_map { |child, parent| child if descendants.include?(parent) && !descendants.include?(child) }
-        break if children.empty?
-
-        descendants.concat(children)
-      end
-      descendants.each { |child| signal_process("STOP", child) }
+    cleanup_errors = []
+    try_signal = lambda do |signal, target|
+      signal_process(signal, target)
+    rescue Errno::EPERM => e
+      cleanup_errors << "#{e.class}: #{e.message}"
     end
-  ensure
-    descendants.reverse_each { |child| signal_process("KILL", child) }
-    signal_process("KILL", -pid)
+    begin
+      try_signal.call("STOP", -pid)
+      2.times do
+        output, status = Open3.capture2("ps", "-eo", "pid=,ppid=")
+        raise "Cannot inspect benchmark process tree" unless status.success?
+
+        rows = output.lines.map { |line| line.split.map(&:to_i) }
+        loop do
+          children = rows.filter_map { |child, parent| child if descendants.include?(parent) && !descendants.include?(child) }
+          break if children.empty?
+
+          descendants.concat(children)
+        end
+        descendants.each { |child| try_signal.call("STOP", child) }
+      end
+    ensure
+      signal_process("KILL", pid)
+      descendants.reverse_each { |child| try_signal.call("KILL", child) unless child == pid }
+      try_signal.call("KILL", -pid)
+    end
+    cleanup_errors
   end
 
   def contained(directory, relative)
@@ -98,28 +110,28 @@ module CompareBenchmarks
     stderr = +"".b
     status = nil
     timed_out = false
-    Open3.popen3(config.fetch("env", {}), *command, chdir: config.fetch("directory"), pgroup: true) do |input, output, error, process|
-      input.close
-      readers = [output, error].zip([stdout, stderr]).map do |stream, buffer|
-        Thread.new do
-          loop { buffer << stream.readpartial(16_384) }
-        rescue IOError
-          nil
-        end
+    cleanup_errors = []
+    input, output, error, process = Open3.popen3(config.fetch("env", {}), *command, chdir: config.fetch("directory"), pgroup: true)
+    input.close
+    readers = [output, error].zip([stdout, stderr]).map do |stream, buffer|
+      Thread.new do
+        loop { buffer << stream.readpartial(16_384) }
+      rescue IOError
+        nil
       end
-      begin
-        Timeout.timeout(config.fetch("timeout_seconds", 120)) do
-          status = process.value
-          readers.each(&:value)
-        end
-      rescue Timeout::Error
-        timed_out = true
-        kill_tree(process.pid)
+    end
+    begin
+      Timeout.timeout(config.fetch("timeout_seconds", 120)) do
         status = process.value
-      ensure
-        [output, error].each { |stream| stream.close unless stream.closed? }
         readers.each(&:value)
       end
+    rescue Timeout::Error
+      timed_out = true
+      cleanup_errors = kill_tree(process.pid)
+      status = process.value
+    ensure
+      [output, error].each { |stream| stream.close unless stream.closed? }
+      readers.each(&:value)
     end
     elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
     logs = File.join(config.fetch("directory"), "comparison-logs")
@@ -128,6 +140,7 @@ module CompareBenchmarks
     File.write(File.join(logs, "#{label}.stderr"), stderr)
     if timed_out
       partial = { "seconds" => elapsed, "phase" => label, "stdout_bytes" => stdout.bytesize, "stderr_bytes" => stderr.bytesize }
+      partial["cleanup_errors"] = cleanup_errors unless cleanup_errors.empty?
       raise TimedOut.new(config.fetch("timeout_seconds", 120), partial)
     end
     unless config.fetch("exit_codes", [0, 1, 2]).include?(status.exitstatus)
@@ -153,23 +166,20 @@ module CompareBenchmarks
     clear_cache = -> { config.fetch("caches").each { |cache| FileUtils.rm_rf(contained(directory, cache)) } }
     cold_count = config["probe_only"] ? 1 : 3
     result["full"] = []
+    result["incremental"] = [] unless config["probe_only"]
     cold_count.times do |index|
       File.binwrite(path, original)
       clear_cache.call
       warn "#{config.fetch('project')} #{config.fetch('tool')} cold #{index + 1}/#{cold_count}"
       result.fetch("full") << run(config, config.fetch("full"), "cold-#{index}")
-    end
-    return result if config["probe_only"]
+      next if config["probe_only"]
 
-    result["incremental"] = []
-    3.times do |index|
-      File.binwrite(path, original)
-      clear_cache.call
-      run(config, config.fetch("full"), "warmup-#{index}")
       File.binwrite(path, edited)
       warn "#{config.fetch('project')} #{config.fetch('tool')} edited #{index + 1}/3"
       result.fetch("incremental") << run(config, config.fetch("incremental"), "edited-#{index}")
     end
+    return result if config["probe_only"]
+
     %w[full incremental].each do |phase|
       result["#{phase}_median_seconds"] = result.fetch(phase).map { |run| run.fetch("seconds") }.sort.fetch(1)
     end

@@ -7,12 +7,20 @@ require "rbconfig"
 require "tmpdir"
 
 RSpec.describe "end-to-end benchmark script" do
-  it "records three cold and three independently warmed runs and restores the source" do
+  it "records three independent cold and edited pairs and restores the source" do
     Dir.mktmpdir("ripr-comparison") do |directory|
       source = "def answer; 42; end\n"
       File.write(File.join(directory, "source.rb"), source)
       code = <<~RUBY
         require "json"
+        if File.read("source.rb").include?("(42)")
+          raise "cold cache was not retained" unless File.read(".ripr/marker") == "cold"
+          File.write(".ripr/marker", "edited")
+        else
+          raise "cache was not cleared before cold run" if File.exist?(".ripr")
+          Dir.mkdir(".ripr")
+          File.write(".ripr/marker", "cold")
+        end
         File.open("invocations", "a") { |file| file.puts(File.read("source.rb").strip) }
         puts JSON.generate("summary" => { "killed" => 1, "survived" => 0 })
       RUBY
@@ -31,8 +39,7 @@ RSpec.describe "end-to-end benchmark script" do
       expect(result.fetch("incremental").size).to eq(3)
       expect(result.fetch("full").first.fetch("summary").fetch("total")).to eq(1)
       invocations = File.readlines(File.join(directory, "invocations"))
-      expect(invocations.size).to eq(9)
-      expect(invocations.count { |line| line.include?("(42)") }).to eq(3)
+      expect(invocations).to eq(["def answer; 42; end\n", "def answer; (42); end\n"] * 3)
       expect(File.read(File.join(directory, "source.rb"))).to eq(source)
     end
   end
@@ -192,7 +199,137 @@ RSpec.describe "end-to-end benchmark script" do
         expect(result.fetch(phase).all? { |run| run.fetch("summary").fetch("total") == 1 }).to be(true)
         expect(result.fetch("partial").fetch("phase")).to eq("#{phase == 'full' ? 'cold' : 'edited'}-#{failure_run - 1}")
         expect(result.fetch("full").size).to eq(3) if phase == "incremental"
+        expect(result.fetch("incremental").size).to eq(1) if phase == "full"
         expect(File.read(File.join(directory, "source.rb"))).to eq("42\n")
+      end
+    end
+  end
+
+  %w[group descendant].each do |denial|
+    it "keeps the deadline and owned child cleanup when #{denial} signals are denied" do
+      Dir.mktmpdir("ripr-denied-signal") do |directory|
+        File.write(File.join(directory, "source.rb"), "42\n")
+        code = <<~RUBY
+          $stdout.sync = true
+          File.write("owned.pid", Process.pid)
+          ready, signal = IO.pipe
+          fork do
+            ready.close
+            Process.setpgid(0, 0)
+            File.write("descendant.pid", Process.pid)
+            signal.write(".")
+            signal.close
+            sleep 60
+          end
+          signal.close
+          ready.read(1)
+          puts "progress before denied cleanup"
+          sleep 60
+        RUBY
+        bootstrap = File.join(directory, "deny-signals.rb")
+        File.write(bootstrap, <<~RUBY)
+          module DeniedBenchmarkSignals
+            def kill(signal, pid)
+              owned = Integer(File.read("owned.pid")) if File.file?("owned.pid")
+              denied = #{denial.dump} == "group" ? pid.negative? : owned && pid.positive? && pid != owned
+              if denied
+                raise Errno::EPERM, "injected denial"
+              end
+              result = super
+              File.open("signals", "a") { |file| file.puts("\#{signal}:\#{pid}:sent") }
+              result
+            end
+          end
+          Process.singleton_class.prepend(DeniedBenchmarkSignals)
+        RUBY
+        command = [RbConfig.ruby, "-e", code]
+        config = { "project" => "denied", "tool" => "ripr", "directory" => directory,
+                   "file" => "source.rb", "before" => "42", "after" => "(42)", "caches" => [],
+                   "full" => command, "incremental" => command, "format" => "ripr", "timeout_seconds" => 0.4 }
+        manifest = File.join(directory, "manifest.json")
+        destination = File.join(directory, "results.json")
+        File.write(manifest, JSON.generate([config]))
+        script = File.expand_path("../script/compare_benchmarks.rb", __dir__)
+        Open3.popen3(RbConfig.ruby, "-r", bootstrap, script, manifest, destination,
+                     chdir: directory) do |input, _output, error, process|
+          input.close
+          finished = process.join(3)
+          unless finished
+            Process.kill("KILL", process.pid)
+            process.join
+          end
+          expect(finished).not_to be_nil, "denied auxiliary signals prevented owned child cleanup"
+          expect(process.value.success?).to be(true), error.read
+        end
+        result = JSON.parse(File.read(destination)).first
+        expect(result.fetch("blocked")).to include("exceeded")
+        owned = Integer(File.read(File.join(directory, "owned.pid")))
+        descendant = Integer(File.read(File.join(directory, "descendant.pid")))
+        denied_pid = denial == "group" ? -owned : descendant
+        expect(result.fetch("partial").fetch("cleanup_errors").join).to include("EPERM", "STOP", "PID #{denied_pid}")
+        expect(File.read(File.join(directory, "signals"))).to include("KILL:#{owned}:sent")
+        expect(File.read(File.join(directory, "comparison-logs/cold-0.stdout"))).to include("progress before denied cleanup")
+        expect(File.read(File.join(directory, "source.rb"))).to eq("42\n")
+      ensure
+        %w[owned.pid descendant.pid].each do |file|
+          next unless directory && File.file?(File.join(directory, file))
+
+          begin
+            Process.kill("KILL", Integer(File.read(File.join(directory, file))))
+          rescue Errno::ESRCH
+            nil
+          end
+        end
+      end
+    end
+  end
+
+  it "returns an owned KILL denial without implicitly waiting for the unkillable child" do
+    Dir.mktmpdir("ripr-denied-owned-kill") do |directory|
+      File.write(File.join(directory, "source.rb"), "42\n")
+      code = 'File.write("owned.pid", Process.pid); $stdout.sync = true; puts "owned child ready"; sleep 60'
+      bootstrap = File.join(directory, "deny-owned-kill.rb")
+      File.write(bootstrap, <<~RUBY)
+        module DeniedOwnedKill
+          def kill(signal, pid)
+            owned = Integer(File.read("owned.pid")) if File.file?("owned.pid")
+            raise Errno::EPERM, "injected owned denial" if signal == "KILL" && pid == owned
+
+            super
+          end
+        end
+        Process.singleton_class.prepend(DeniedOwnedKill)
+      RUBY
+      command = [RbConfig.ruby, "-e", code]
+      config = { "project" => "denied-owned", "tool" => "ripr", "directory" => directory,
+                 "file" => "source.rb", "before" => "42", "after" => "(42)", "caches" => [],
+                 "full" => command, "incremental" => command, "format" => "ripr", "timeout_seconds" => 0.4 }
+      manifest = File.join(directory, "manifest.json")
+      destination = File.join(directory, "results.json")
+      File.write(manifest, JSON.generate([config]))
+      script = File.expand_path("../script/compare_benchmarks.rb", __dir__)
+      Open3.popen3(RbConfig.ruby, "-r", bootstrap, script, manifest, destination,
+                   chdir: directory) do |input, _output, error, process|
+        input.close
+        finished = process.join(3)
+        unless finished
+          Process.kill("KILL", process.pid)
+          process.join
+        end
+        expect(finished).not_to be_nil, "owned KILL denial still waited for the child"
+        expect(process.value.success?).to be(true), error.read
+      end
+      owned = Integer(File.read(File.join(directory, "owned.pid")))
+      result = JSON.parse(File.read(destination)).first
+      expect(result.fetch("blocked")).to include("Errno::EPERM", "KILL", "PID #{owned}")
+      expect(File.read(File.join(directory, "source.rb"))).to eq("42\n")
+    ensure
+      if directory && File.file?(File.join(directory, "owned.pid"))
+        begin
+          Process.kill("KILL", Integer(File.read(File.join(directory, "owned.pid"))))
+        rescue Errno::ESRCH
+          nil
+        end
       end
     end
   end
