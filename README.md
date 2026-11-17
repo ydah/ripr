@@ -10,27 +10,24 @@ ripr is a diff-driven mutation test runner for Ruby. It observes values during a
 
 Tests of `age >= 18` using only ages 20 and 10 cannot distinguish it from `age > 18`. ripr reports `not_infected` with observed operands `[[20, 18], [10, 18]]`. Age 18 exposes the missing boundary.
 
-## Try this checkout
+## Install and run
 
 Requires CRuby 3.3 or later on Linux or macOS. Prism is the only runtime gem dependency; the target project supplies Minitest or RSpec.
 
-```sh
-bundle install
-bundle exec ripr test/fixtures/projects/minitest_basic --reporter agent
-bundle exec rake test
-```
-
-Before the first RubyGems release, add a local checkout to another project's Gemfile:
+Add ripr to the target project's Gemfile:
 
 ```ruby
 group :test do
-  gem "ripr", path: "/path/to/ripr", require: false
+  gem "ripr", "~> 0.1", require: false
 end
 ```
+
+For an unreleased checkout, use `gem "ripr", path: "/path/to/ripr", require: false` instead.
 
 Run from the target project root:
 
 ```sh
+bundle install
 bundle exec ripr init
 bundle exec ripr --since origin/main
 bundle exec ripr --full --fail-on-survived --threshold 80
