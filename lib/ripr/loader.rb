@@ -4,12 +4,23 @@ require "monitor"
 
 module Ripr
   class Loader
+    @active_loaders = []
+
+    class << self
+      attr_reader :active_loaders
+
+      def instrumented?(path, expected_code)
+        active_loaders.any? { |loader| loader.instrumented?(path, expected_code) }
+      end
+    end
+
     def initialize(code_by_path)
       @code = code_by_path.to_h { |path, code| [File.expand_path(path), code] }
       @paths = @code.keys.to_h { |path| [File.realpath(path), path] }
       @hooks = []
       @loading = []
       @required = {}
+      @compiled = {}
       @lock = Monitor.new
     end
 
@@ -22,6 +33,7 @@ module Ripr
       else
         install_iseq_hook
       end
+      Loader.active_loaders << self
       self
     end
 
@@ -32,7 +44,15 @@ module Ripr
         end
       end
       @hooks.clear
+      @compiled.clear
+      Loader.active_loaders.delete(self)
       self
+    end
+
+    def instrumented?(path, expected_code)
+      @compiled[File.realpath(path)] == expected_code
+    rescue Errno::ENOENT, Errno::ENOTDIR
+      false
     end
 
     def code_for(path)
@@ -78,8 +98,15 @@ module Ripr
       end
     end
 
+    def compile(path)
+      code = code_for(path)
+      instruction_sequence = RubyVM::InstructionSequence.compile(code, path, path)
+      @compiled[File.realpath(path)] = code
+      instruction_sequence
+    end
+
     def evaluate(path)
-      RubyVM::InstructionSequence.compile(code_for(path), path, path).eval
+      compile(path).eval
     end
 
     private
@@ -90,7 +117,7 @@ module Ripr
         define_method(:load_iseq) do |path|
           code = loader.code_for(path)
           if code
-            RubyVM::InstructionSequence.compile(code, path, path)
+            loader.compile(path)
           else
             defined?(super) ? super(path) : nil
           end

@@ -8,6 +8,7 @@ require "fileutils"
 require "yaml"
 require "prism"
 require "ripr/engine/result_cache"
+require "ripr/config"
 
 RSpec.describe "incremental ripr commands" do
   let(:executable) { File.expand_path("../exe/ripr", __dir__) }
@@ -43,6 +44,44 @@ RSpec.describe "incremental ripr commands" do
 
   def snapshot(directory)
     JSON.parse(File.read(File.join(directory, ".ripr/snapshot.json")))
+  end
+
+  %w[load_iseq require].each do |mode|
+    it "rejects source preloaded without instrumentation using #{mode}" do
+      with_project do |directory|
+        source = File.join(directory, "lib/sample.rb")
+        output, error, status = Open3.capture3({ "RIPR_LOADER" => mode }, RbConfig.ruby, "-r", source, executable,
+                                               "--full", "--reporter", "agent", chdir: directory)
+        expect(status.exitstatus).to eq(1), error
+        expect(error).to include("lib/sample.rb", "loaded before ripr")
+        expect(output).to be_empty
+        expect(File.exist?(File.join(directory, ".ripr/snapshot.json"))).to be(false)
+      end
+    end
+  end
+
+  it "allows preloaded files that have no selected mutation sites" do
+    with_project do |directory|
+      helper = File.join(directory, "lib/constants.rb")
+      File.write(helper, "module PreloadedConstants; VALUE = 7; end\n")
+      output, error, status = Open3.capture3(RbConfig.ruby, "-r", helper, executable, "--operators", "comparison",
+                                             "--full", "--reporter", "agent", chdir: directory)
+      expect(status.exitstatus).to eq(0), error
+      expect(JSON.parse(output).fetch("gaps").first.fetch("kind")).to eq("not_infected")
+    end
+  end
+
+  it "recognizes a preloaded target through a realpath alias" do
+    with_project do |directory|
+      source = File.join(directory, "lib/sample.rb")
+      alias_path = File.join(directory, "preload.rb")
+      File.symlink(source, alias_path)
+      output, error, status = Open3.capture3(RbConfig.ruby, "-r", alias_path, executable, "--full", "--reporter", "agent",
+                                             chdir: directory)
+      expect(status.exitstatus).to eq(1), error
+      expect(error).to include("lib/sample.rb", "loaded before ripr")
+      expect(output).to be_empty
+    end
   end
 
   it "selects changed nodes or their entire method and treats --full as a full run" do
@@ -252,9 +291,26 @@ RSpec.describe "incremental ripr commands" do
       Dir.chdir(directory) do
         config = { full: false, only: [], operators: ["comparison"], arid_callees: [], tests: nil, samples: true,
                    seed: 0, timeout: {}, jobs: 1, verify_not_infected: false }
-        cache = Ripr::Engine::ResultCache.new(config, sources: { "lib/a.rb" => "\xFF".b }, test_files: [],
+        cache = Ripr::Engine::ResultCache.new(config, sources: { "lib/a.rb" => "\xFF".b }, test_files: [], test_ids: [],
                                                       framework: "minitest", mutants: [])
         expect(cache.source_hash).to match(/\A[0-9a-f]{64}\z/)
+      end
+    end
+  end
+
+  it "invalidates results when framework-selected test identities change without a file edit" do
+    with_project do |directory|
+      Dir.chdir(directory) do
+        config = Ripr::Config.load({ operators: ["comparison"] })
+        mutant = { "id" => "sample", "full_id" => "sample::comparison", "method_hash" => "method" }
+        arguments = { sources: { "lib/sample.rb" => File.read("lib/sample.rb") }, test_files: ["test/sample_test.rb"],
+                      framework: "minitest", mutants: [mutant] }
+        cache = Ripr::Engine::ResultCache.new(config, **arguments, test_ids: ["SampleTest#old"])
+        cache.write([mutant.merge("status" => "not_infected", "observed" => [], "covering_tests" => [])], {}, {})
+        unchanged = Ripr::Engine::ResultCache.new(config, **arguments, test_ids: ["SampleTest#old"])
+        expect(unchanged.result_for(mutant)).not_to be_nil
+        changed = Ripr::Engine::ResultCache.new(config, **arguments, test_ids: ["SampleTest#old", "SampleTest#new"])
+        expect(changed.result_for(mutant)).to be_nil
       end
     end
   end

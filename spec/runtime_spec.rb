@@ -71,6 +71,14 @@ RSpec.describe "mutation runtime" do
     expect { Ripr::R.bin(site, 4, 0) { |l, r, _k| l / r } }.to raise_error(ZeroDivisionError)
   end
 
+  it "records conservative infection when a test catches the original operator exception" do
+    start_probe
+    expect { Ripr::R.bin(site, 4, 0) { |l, r, k| k.zero? ? l / r : l * r } }.to raise_error(ZeroDivisionError)
+    snapshot = Ripr::R.probe.snapshot
+    expect(snapshot.fetch("reach").fetch(site)).to eq(["SampleTest#test_adult"])
+    expect(snapshot.fetch("infect").fetch("adult-boundary")).to eq(["SampleTest#test_adult"])
+  end
+
   it "does not call speculative operators on user objects" do
     start_probe
     calls = []

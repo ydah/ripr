@@ -155,9 +155,14 @@ module Ripr
       end
 
       def bin(site, left, right, pure = true) # rubocop:disable Style/OptionalBooleanParameter
-        if @probe
-          original = yield(left, right, 0)
-          @probe.observe_bin(site, left, right, original, pure) { |variant| yield(left, right, variant) }
+        if (probe = @probe)
+          original = begin
+            yield(left, right, 0)
+          rescue Exception # rubocop:disable Lint/RescueException -- Record caught test exceptions without changing their propagation.
+            probe.reach(site)
+            raise
+          end
+          probe.observe_bin(site, left, right, original, pure) { |variant| yield(left, right, variant) }
           original
         else
           yield(left, right, site == @active_site ? @active_variant : 0)

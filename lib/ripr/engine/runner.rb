@@ -48,7 +48,7 @@ module Ripr
           @sources[path] = source
           analysis = Core::Analyzer.call(source, path, operators: @config[:operators], arid_callees: @config[:arid_callees])
           instrumented = Core::Instrumenter.call(source, path, analysis.fetch(:sites))
-          @codes[File.expand_path(path)] = instrumented.fetch(:code)
+          @codes[File.expand_path(path)] = instrumented.fetch(:code) unless instrumented.fetch(:site_table).empty?
           @table.merge!(instrumented.fetch(:site_table))
           analysis.fetch(:mutants).each do |mutant|
             mutant[:invalid] = true if instrumented.fetch(:invalid).include?(mutant[:id])
@@ -79,6 +79,7 @@ module Ripr
         return selected.map { |m| m.merge("status" => "planned") } if @config[:dry_run]
         return [] if selected.empty?
 
+        reject_preloaded_sources
         ENV["RIPR"] = "1"
         @loader = Loader.new(@codes).install
         R.configure(@table, samples: @config[:samples])
@@ -86,7 +87,8 @@ module Ripr
         adapter = load_tests
         load_reached = R.probe.snapshot.fetch("load_reached")
         R.probe = nil
-        @cache = ResultCache.new(@config, sources: @sources, test_files: @test_files, framework: @framework, mutants: @mutants)
+        @cache = ResultCache.new(@config, sources: @sources, test_files: @test_files, framework: @framework, mutants: @mutants,
+                                          test_ids: adapter.tests.map { |test| test.fetch("id") })
         prepare_baseline(adapter, load_reached)
         results = Scheduler.new(@config, @baseline, @table, @cache, warnings: @warnings, metrics: @metrics).call(selected, adapter)
         @cache.write(results, @baseline, @metrics)
@@ -98,6 +100,21 @@ module Ripr
       end
 
       private
+
+      def reject_preloaded_sources
+        loaded = $LOADED_FEATURES.filter_map do |feature|
+          File.realpath(feature)
+        rescue Errno::ENOENT, Errno::ENOTDIR
+          nil
+        end
+        @codes.each do |path, code|
+          next unless loaded.include?(File.realpath(path))
+          next if Loader.instrumented?(path, code)
+
+          raise ArgumentError,
+                "target #{relative(path)} was loaded before ripr; start ripr without pre-requiring target source"
+        end
+      end
 
       def select_mutants(mutants)
         result = mutants

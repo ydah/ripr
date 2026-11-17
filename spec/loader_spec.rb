@@ -36,6 +36,29 @@ RSpec.describe "instrumented loading" do
       expect(result).to eq([true, false, "instrumented", true])
     end
 
+    it "records only code actually compiled by an active loader using #{mode}" do
+      result = isolated_loader(<<~'RUBY', mode)
+        path = File.join(dir, "target.rb")
+        alias_path = File.join(dir, "alias.rb")
+        code = "$value = :instrumented\n"
+        File.write(path, "$value = :original\n")
+        File.symlink(path, alias_path)
+        loader = Ripr::Loader.new(path => code).install
+        before = Ripr::Loader.instrumented?(path, code)
+        require(path)
+        during = Ripr::Loader.instrumented?(alias_path, code)
+        different = Ripr::Loader.instrumented?(path, "$value = :different\n")
+        loader.uninstall
+        after = Ripr::Loader.instrumented?(path, code)
+        load(path)
+        loader.install
+        reinstalled = Ripr::Loader.instrumented?(path, code)
+        loader.uninstall
+        puts JSON.generate([before, during, different, after, reinstalled])
+      RUBY
+      expect(result).to eq([false, true, false, false, false])
+    end
+
     it "keeps original file and directory locations using #{mode}" do
       result = isolated_loader(<<~'RUBY', mode)
         path = File.join(dir, "target.rb")
@@ -86,6 +109,22 @@ RSpec.describe "instrumented loading" do
                           RubyVM::InstructionSequence.method(:load_iseq).owner == original_owner])
     RUBY
     expect(result).to eq([true, false, true])
+  end
+
+  it "retains the earlier active loader registration when a nested loader is removed" do
+    result = isolated_loader(<<~'RUBY')
+      path = File.join(dir, "target.rb")
+      code = "$value = :instrumented\n"
+      File.write(path, "$value = :original\n")
+      first = Ripr::Loader.new(path => code).install
+      require(path)
+      second = Ripr::Loader.new(path => code).install
+      second.uninstall
+      still_instrumented = Ripr::Loader.instrumented?(path, code)
+      first.uninstall
+      puts JSON.generate([still_instrumented, Ripr::Loader.instrumented?(path, code)])
+    RUBY
+    expect(result).to eq([true, false])
   end
 
   it "rejects wrapped target load rather than silently bypassing instrumentation in require mode" do
