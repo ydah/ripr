@@ -3,23 +3,25 @@
 module Ripr
   module Value
     TYPES = [Integer, Float, Rational, String, Symbol, NilClass, TrueClass, FalseClass].freeze
-    OPERATORS = %i[>= > <= < == != + - * / % coerce ! encoding [] encode to_s].freeze
+    PROBE_METHODS = %i[>= > <= < <=> == != + - * / % coerce method_missing ! encoding [] encode to_s].freeze
     CLASS_OF = Object.instance_method(:class)
     SINGLETON_METHODS = Object.instance_method(:singleton_methods)
+    PRIVATE_METHODS = Object.instance_method(:private_methods)
 
     module_function
 
     def pure?(value)
       klass = CLASS_OF.bind_call(value)
-      TYPES.include?(klass) && SINGLETON_METHODS.bind_call(value).empty? && core_ops_intact?(value)
+      TYPES.include?(klass) && SINGLETON_METHODS.bind_call(value).empty? &&
+        !PRIVATE_METHODS.bind_call(value, false).intersect?(PROBE_METHODS) && core_ops_intact?(klass)
     end
 
-    def core_ops_intact?(*values)
-      values.all? do |value|
-        klass = CLASS_OF.bind_call(value)
-        OPERATORS.all? do |operator|
-          !klass.method_defined?(operator) || klass.instance_method(operator).source_location.nil?
-        end
+    def core_ops_intact?(klass)
+      PROBE_METHODS.all? do |name|
+        next true unless klass.method_defined?(name) || klass.private_method_defined?(name)
+
+        method = klass.instance_method(name)
+        method.source_location.nil? && method.original_name == name
       end
     end
 

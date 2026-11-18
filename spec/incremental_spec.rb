@@ -103,18 +103,18 @@ RSpec.describe "incremental mutation results" do
       path = File.join(directory, ".ripr", "snapshot.json")
       snapshot = Ripr::Snapshot.new(path)
       expect(snapshot.read).to eq({})
-      data = { "version" => 1, "mutants" => { mutant.fetch("full_id") => mutant } }
+      data = { "version" => Ripr::Snapshot::VERSION, "mutants" => { mutant.fetch("full_id") => mutant } }
       snapshot.write(data)
       expect(snapshot.read).to eq(data)
       allow(File).to receive(:rename).and_raise(IOError, "disk failure")
-      expect { snapshot.write("version" => 1, "mutants" => {}) }.to raise_error(IOError)
+      expect { snapshot.write("version" => Ripr::Snapshot::VERSION, "mutants" => {}) }.to raise_error(IOError)
       expect(JSON.parse(File.read(path))).to eq(data)
       expect(Dir.children(File.dirname(path))).to eq(["snapshot.json"])
       File.write(path, "bad json")
       expect { expect(snapshot.read).to eq({}) }.to output(/snapshot/).to_stderr
       File.write(path, '{"version":999}')
       expect { expect(snapshot.read).to eq({}) }.to output(/snapshot/).to_stderr
-      File.write(path, '{"version":1,"mutants":[]}')
+      File.write(path, JSON.generate("version" => Ripr::Snapshot::VERSION, "mutants" => []))
       expect { expect(snapshot.read).to eq({}) }.to output(/snapshot/).to_stderr
     end
   end
@@ -133,6 +133,14 @@ RSpec.describe "incremental mutation results" do
       expect(Ripr::Core::ReusePlanner.reusable?(record.merge("status" => status), mutant, **options)).to be(false)
     end
     expect(Ripr::Core::ReusePlanner.reusable?(nil, mutant, **options)).to be(false)
+  end
+
+  it "discards snapshots recorded before indirect operator callbacks were checked" do
+    Dir.mktmpdir("ripr-old-snapshot") do |directory|
+      path = File.join(directory, "snapshot.json")
+      File.write(path, JSON.generate("version" => 1, "mutants" => { mutant.fetch("full_id") => mutant }))
+      expect { expect(Ripr::Snapshot.new(path).read).to eq({}) }.to output(/unsupported snapshot/).to_stderr
+    end
   end
 
   it "persists acceptances, updates reasons, and invalidates edited methods" do

@@ -52,8 +52,8 @@ module Ripr
           records[result.fetch("full_id")] = result.merge("env_hash" => @env_hash, "tests" => @test_hashes.slice(*files),
                                                           "recorded_at" => Time.now.utc.iso8601)
         end
-        @snapshot.write("version" => 1, "env_hash" => @env_hash, "source_hash" => @source_hash, "test_hashes" => @test_hashes,
-                        "mutants" => records, "baseline" => baseline, "metrics" => metrics)
+        @snapshot.write("version" => Snapshot::VERSION, "env_hash" => @env_hash, "source_hash" => @source_hash,
+                        "test_hashes" => @test_hashes, "mutants" => records, "baseline" => baseline, "metrics" => metrics)
       end
 
       private

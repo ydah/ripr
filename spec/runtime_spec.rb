@@ -144,6 +144,67 @@ RSpec.describe "mutation runtime" do
     String.define_method(:>, original)
   end
 
+  it "does not call a redefined comparison callback twice" do
+    start_probe
+    original = String.instance_method(:<=>)
+    left = +"20"
+    calls = []
+    String.define_method(:<=>) do |right|
+      calls << right if equal?(left)
+      original.bind_call(self, right)
+    end
+    expect(observe(left, "18")).to be(true)
+    expect(calls).to eq(["18"])
+    expect(Ripr::R.probe.snapshot.fetch("infect").fetch("adult-boundary")).to eq(["SampleTest#test_adult"])
+  ensure
+    String.define_method(:<=>, original)
+  end
+
+  it "leaves operands untouched when a replacement aliases a native mutator" do
+    start_probe
+    original = String.instance_method(:>)
+    String.alias_method(:>, :replace)
+    left = +"20"
+    expect(observe(left, "18")).to be(true)
+    expect(left).to eq("20")
+    expect(Ripr::R.probe.snapshot.fetch("infect").fetch("adult-boundary")).to eq(["SampleTest#test_adult"])
+  ensure
+    String.define_method(:>, original)
+  end
+
+  it "does not send a missing replacement operator to user method_missing" do
+    start_probe
+    left = +"20"
+    calls = []
+    String.define_method(:method_missing) do |name, *arguments|
+      if name == :- && equal?(left)
+        calls << name
+        self
+      else
+        super(name, *arguments)
+      end
+    end
+    expect(Ripr::R.bin(site, left, "18") { |l, r, k| k.zero? ? l + r : l - r }).to eq("2018")
+    expect(calls).to be_empty
+    expect(Ripr::R.probe.snapshot.fetch("infect").fetch("adult-boundary")).to eq(["SampleTest#test_adult"])
+  ensure
+    String.remove_method(:method_missing)
+  end
+
+  it "does not call a private singleton comparison callback twice" do
+    start_probe
+    left = +"20"
+    calls = []
+    left.define_singleton_method(:<=>) do |right|
+      calls << right
+      1
+    end
+    left.singleton_class.__send__(:private, :<=>)
+    expect(observe(left, "18")).to be(true)
+    expect(calls).to eq(["18"])
+    expect(Ripr::R.probe.snapshot.fetch("infect").fetch("adult-boundary")).to eq(["SampleTest#test_adult"])
+  end
+
   it "distinguishes floating point signs and exact value classes" do
     expect(Ripr::Value.same?(0.0, -0.0)).to be(false)
     expect(Ripr::Value.same?(1, 1.0)).to be(false)

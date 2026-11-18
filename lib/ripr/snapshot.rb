@@ -6,6 +6,8 @@ require "tempfile"
 
 module Ripr
   class Snapshot
+    VERSION = 2
+
     def initialize(path = ".ripr/snapshot.json")
       @path = File.expand_path(path)
     end
@@ -14,7 +16,7 @@ module Ripr
       return {} unless File.file?(@path)
 
       data = JSON.parse(File.read(@path))
-      unless data.is_a?(Hash) && data["version"] == 1 && data["mutants"].is_a?(Hash) && data["mutants"].values.all?(Hash)
+      unless data.is_a?(Hash) && data["version"] == VERSION && data["mutants"].is_a?(Hash) && data["mutants"].values.all?(Hash)
         warn "ripr: ignoring unsupported snapshot #{@path}"
         return {}
       end

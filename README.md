@@ -10,6 +10,8 @@ ripr is a diff-driven mutation test runner for Ruby. It observes values during a
 
 Tests of `age >= 18` using only ages 20 and 10 cannot distinguish it from `age > 18`. ripr reports `not_infected` with observed operands `[[20, 18], [10, 18]]`. Age 18 exposes the missing boundary.
 
+When ripr cannot safely compare values during the baseline, it keeps the affected tests in the mutation run.
+
 ## Install and run
 
 Requires CRuby 3.3 or later on Linux or macOS. Prism is the only runtime gem dependency; the target project supplies Minitest or RSpec.
