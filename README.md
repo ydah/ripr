@@ -84,7 +84,7 @@ samples: true
 
 The eight default operators cover comparisons, arithmetic, integer and boolean literals, condition negation, boolean connectors, return nil, and statement removal. `return_nil` preserves evaluation and side effects, then discards the returned value. `--no-samples` disables operand observations.
 
-Ignore the `.ripr/` cache directory in Git. Source edits invalidate reuse, while independent test-only edits can reuse part of the baseline. `--only` reruns selected mutations. `--verify-not-infected` runs tests to check that classification.
+Ignore the `.ripr/` cache directory in Git. Source edits invalidate reuse, while independent test-only edits can reuse part of the baseline. Use `--full` after changing external data or environment variables. `--only` reruns selected mutations. `--verify-not-infected` runs tests to check that classification.
 
 | Exit | Meaning |
 | --- | --- |
