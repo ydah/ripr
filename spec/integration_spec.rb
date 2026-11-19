@@ -118,6 +118,30 @@ RSpec.describe "test framework adapters" do
     end
   end
 
+  it "reuses discovered Minitest locations when listing and running tests" do
+    result = isolated_adapter("minitest", minitest_source, <<~RUBY)
+      adapter = Ripr::Integration::Minitest.new([file]).load
+      tests = adapter.tests
+      ids = ["AdapterTest#test_pass", "AdapterTest#test_fail"]
+      lookups = 0
+      trace = TracePoint.new(:c_call) do |event|
+        lookups += 1 if event.method_id == :instance_method && event.self.equal?(AdapterTest)
+      end
+      run = trace.enable do
+        adapter.tests.first.fetch("file").replace("changed.rb")
+        adapter.run(ids, fail_fast: true)
+      end
+      puts JSON.generate([tests, run, lookups])
+    RUBY
+    tests, run, lookups = result
+    expect(run.fetch("tests").keys).to eq(%w[AdapterTest#test_pass AdapterTest#test_fail])
+    expect(run.fetch("failures").map { |failure| failure.fetch("id") }).to eq(["AdapterTest#test_fail"])
+    tests.each do |test|
+      expect(run.fetch("tests").fetch(test.fetch("id"))).to include(test.except("id"))
+    end
+    expect(lookups).to eq(0)
+  end
+
   it "returns the diagnostic for an RSpec suite hook failure" do
     source = <<~RUBY
       RSpec.configure { |config| config.before(:suite) { raise "suite boot failure" } }

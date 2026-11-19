@@ -23,30 +23,31 @@ module Ripr
         ::Minitest.seed = @seed
         srand(@seed)
         (::Minitest::Runnable.runnables - existing).each do |klass|
-          klass.runnable_methods.sort.each { |method| @cases["#{klass}##{method}"] = [klass, method] }
+          klass.runnable_methods.sort.each do |method|
+            file, line = klass.instance_method(method).source_location
+            @cases["#{klass}##{method}"] = [klass, method, File.expand_path(file), line]
+          end
         end
         @loaded = true
         self
       end
 
       def tests
-        @cases.map do |id, (klass, method)|
-          file, line = klass.instance_method(method).source_location
-          { "id" => id, "file" => File.expand_path(file), "line" => line }
+        @cases.map do |id, (_, _, file, line)|
+          { "id" => id, "file" => file.dup, "line" => line }
         end
       end
 
       def run(ids = nil, fail_fast: false)
         ids ||= @cases.keys.sort
-        unknown = ids - @cases.keys
+        unknown = ids.reject { |id| @cases.key?(id) }
         raise ArgumentError, "unknown test IDs: #{unknown.join(', ')}" unless unknown.empty?
 
         result = { "success" => !ids.empty?, "tests" => {}, "failures" => [] }
         result["failures"] << { "message" => "No tests selected" } if ids.empty?
-        metadata = tests.to_h { |test| [test.fetch("id"), test] }
         srand(@seed)
         ids.each do |id|
-          klass, method = @cases.fetch(id)
+          klass, method, file, line = @cases.fetch(id)
           R.current_test = id
           started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
           test = if ::Minitest.respond_to?(:run_one_method)
@@ -55,7 +56,7 @@ module Ripr
                    klass.new(method).run
                  end
           duration = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000
-          result["tests"][id] = metadata.fetch(id).except("id").merge("duration_ms" => duration)
+          result["tests"][id] = { "file" => file.dup, "line" => line, "duration_ms" => duration }
           next if test.passed? || test.skipped?
 
           result["success"] = false
