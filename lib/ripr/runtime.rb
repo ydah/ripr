@@ -56,36 +56,50 @@ module Ripr
     end
 
     def reach(site)
+      test = R.current_test
+      return if test && !@site_table.key?(site)
+
       @mutex.synchronize do
-        record_reach(site)
-        record_infection(site) if R.current_test
+        record_reach(site, test)
+        record_infection(site, test) if test
       end
     end
 
     def observe_bin(site, left, right, original, pure = true) # rubocop:disable Style/OptionalBooleanParameter
-      @mutex.synchronize do
-        record_reach(site)
-        sample_operands(site, left, right)
-        @site_table.fetch(site).each.with_index(1) do |id, variant|
-          next if !R.current_test || @infect.fetch(id, []).include?(R.current_test)
+      variants = @site_table[site]
+      test = R.current_test
+      return if test && !variants
 
-          same = false
-          if pure && Value.pure?(left) && Value.pure?(right)
-            begin
-              same = Value.same?(original, yield(variant))
-            rescue StandardError
-              same = false
-            end
+      @mutex.synchronize do
+        record_reach(site, test)
+        safe_operands = nil
+        if variants && @record_samples && (@samples[site]&.size || 0) < 3
+          safe_operands = Value.pure?(left) && Value.pure?(right)
+          sample_operands(site, left, right) if safe_operands
+        end
+        return unless test
+
+        variants.each.with_index(1) do |id, variant|
+          next if @infect[id]&.include?(test)
+
+          safe_operands = Value.pure?(left) && Value.pure?(right) if pure && safe_operands.nil?
+          same = pure && safe_operands && begin
+            Value.same?(original, yield(variant))
+          rescue StandardError
+            false
           end
-          record(@infect, id, R.current_test) unless same
+          record(@infect, id, test) unless same
         end
       end
     end
 
     def observe_ret(site, value)
+      test = R.current_test
+      return if test && !@site_table.key?(site)
+
       @mutex.synchronize do
-        record_reach(site)
-        record_infection(site) unless Value::CLASS_OF.bind_call(value) == NilClass
+        record_reach(site, test)
+        record_infection(site, test) if test && Value::CLASS_OF.bind_call(value) != NilClass
       end
     end
 
@@ -98,18 +112,16 @@ module Ripr
 
     private
 
-    def record_reach(site)
-      if R.current_test
-        record(@reach, site, R.current_test)
+    def record_reach(site, test)
+      if test
+        record(@reach, site, test)
       else
         @load_reached << site unless @load_reached.include?(site)
       end
     end
 
-    def record_infection(site)
-      return unless R.current_test
-
-      @site_table.fetch(site).each { |id| record(@infect, id, R.current_test) }
+    def record_infection(site, test)
+      @site_table.fetch(site).each { |id| record(@infect, id, test) }
     end
 
     def record(table, key, test)
@@ -118,11 +130,9 @@ module Ripr
     end
 
     def sample_operands(site, left, right)
-      return unless @record_samples && Value.pure?(left) && Value.pure?(right)
-
       pairs = (@samples[site] ||= [])
       pair = [Value.sample(left), Value.sample(right)]
-      pairs << pair if pairs.size < 3 && !pairs.include?(pair)
+      pairs << pair unless pairs.include?(pair)
     end
   end
 

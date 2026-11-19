@@ -113,6 +113,47 @@ RSpec.describe "incremental ripr commands" do
     end
   end
 
+  it "observes only selected sites and refreshes evidence when the scope expands" do
+    with_project do |directory|
+      source = File.join(directory, "lib/sample.rb")
+      File.write(source, <<~RUBY)
+        module Sample
+          def self.first?(value); value >= 18; end
+          def self.second?(value); value >= 18; end
+        end
+      RUBY
+      File.write(File.join(directory, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+        class SampleTest < Minitest::Test
+          def test_both
+            assert Sample.first?(20)
+            assert Sample.second?(18)
+          end
+        end
+      RUBY
+      git(directory, "add", "lib", "test")
+      git(directory, "commit", "-qm", "two comparisons")
+      File.write(source, File.read(source).sub("first?(value); value >= 18", "first?(value); value >= 19"))
+
+      command(directory, "--since", "HEAD")
+      narrow = snapshot(directory)
+      expect(narrow.fetch("mutants").values.map { |m| m.fetch("subject") }).to eq(["Sample.first?"])
+      first = narrow.fetch("mutants").values.first
+      expect(first.fetch("status")).to eq("not_infected")
+      expect(narrow.fetch("baseline").fetch("probe").fetch("reach").keys).to eq([first.fetch("site")])
+
+      command(directory, "--since", "HEAD")
+      expect(snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 0, "reused" => 1)
+
+      command(directory)
+      expanded = snapshot(directory)
+      expect(expanded.fetch("metrics").fetch("baseline_tests_run")).to eq(1)
+      expect(expanded.fetch("mutants").values.to_h { |m| m.values_at("subject", "status") })
+        .to eq("Sample.first?" => "not_infected", "Sample.second?" => "killed")
+    end
+  end
+
   it "reuses an unchanged baseline and results but verifies an explicit --only request" do
     with_project do |directory|
       report, = command(directory)
@@ -292,7 +333,7 @@ RSpec.describe "incremental ripr commands" do
       Dir.chdir(directory) do
         config = { full: false, only: [], operators: ["comparison"], arid_callees: [], tests: nil, samples: true,
                    seed: 0, timeout: {}, jobs: 1, verify_not_infected: false }
-        cache = Ripr::Engine::ResultCache.new(config, sources: { "lib/a.rb" => "\xFF".b }, test_files: [], test_ids: [],
+        cache = Ripr::Engine::ResultCache.new(config, sources: { "lib/a.rb" => "\xFF".b }, test_files: [], test_ids: [], probe_sites: [],
                                                       framework: "minitest", mutants: [])
         expect(cache.source_hash).to match(/\A[0-9a-f]{64}\z/)
       end
@@ -305,7 +346,7 @@ RSpec.describe "incremental ripr commands" do
         config = Ripr::Config.load({ operators: ["comparison"] })
         mutant = { "id" => "sample", "full_id" => "sample::comparison", "method_hash" => "method" }
         arguments = { sources: { "lib/sample.rb" => File.read("lib/sample.rb") }, test_files: ["test/sample_test.rb"],
-                      framework: "minitest", mutants: [mutant] }
+                      framework: "minitest", mutants: [mutant], probe_sites: [] }
         cache = Ripr::Engine::ResultCache.new(config, **arguments, test_ids: ["SampleTest#old"])
         cache.write([mutant.merge("status" => "not_infected", "observed" => [], "covering_tests" => [])], {}, {})
         unchanged = Ripr::Engine::ResultCache.new(config, **arguments, test_ids: ["SampleTest#old"])
@@ -358,7 +399,7 @@ RSpec.describe "incremental ripr commands" do
           config = Ripr::Config.load({ operators: ["comparison"] })
           mutant = { "id" => "sample", "full_id" => "sample::comparison", "method_hash" => "method" }
           arguments = { sources: { "lib/sample.rb" => File.read("lib/sample.rb") }, test_files: ["test/sample_test.rb"],
-                        framework: "minitest", mutants: [mutant], test_ids: ["SampleTest#test"] }
+                        framework: "minitest", mutants: [mutant], test_ids: ["SampleTest#test"], probe_sites: [] }
           cache = Ripr::Engine::ResultCache.new(config, **arguments)
           cache.write([mutant.merge("status" => "not_infected", "observed" => [], "covering_tests" => [])], {}, {})
           expect(Ripr::Engine::ResultCache.new(config, **arguments).result_for(mutant)).not_to be_nil

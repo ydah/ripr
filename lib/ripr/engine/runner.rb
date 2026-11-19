@@ -83,13 +83,15 @@ module Ripr
         ENV["RIPR"] = "1"
         @loader = Loader.new(@codes).install
         R.configure(@table, samples: @config[:samples])
-        R.probe = Probe.new(@table, samples: @config[:samples])
+        # The probe still records unattributed reach for conservative baseline reuse.
+        probe_table = @table.slice(*selected.map { |mutant| mutant.fetch("site") }.uniq)
+        R.probe = Probe.new(probe_table, samples: @config[:samples])
         adapter = load_tests
         load_reached = R.probe.snapshot.fetch("load_reached")
         R.probe = nil
         @cache = ResultCache.new(@config, sources: @sources, test_files: @test_files, framework: @framework, mutants: @mutants,
-                                          test_ids: adapter.tests.map { |test| test.fetch("id") })
-        prepare_baseline(adapter, load_reached)
+                                          test_ids: adapter.tests.map { |test| test.fetch("id") }, probe_sites: probe_table.keys)
+        prepare_baseline(adapter, probe_table, load_reached)
         scheduler = Scheduler.new(@config, @baseline, @table, @cache, warnings: @warnings, metrics: @metrics)
         results = scheduler.call(selected, adapter, &)
         @cache.write(results, @baseline, @metrics)
@@ -183,14 +185,14 @@ module Ripr
         end
       end
 
-      def prepare_baseline(adapter, load_reached)
+      def prepare_baseline(adapter, probe_table, load_reached)
         tests = adapter.tests.map { |test| test.merge("file" => relative(test.fetch("file"))) }
         cache = BaselineCache.new(@cache.previous["baseline"], env_hash: @cache.baseline_env_hash,
                                                                source_hash: @cache.source_hash, test_hashes: @cache.test_hashes,
                                                                tests: tests, full: @config[:full])
         fresh = unless cache.test_ids == []
                   Child.call(timeout_ms: 60_000) do
-                    probe = Probe.new(@table, samples: @config[:samples])
+                    probe = Probe.new(probe_table, samples: @config[:samples])
                     R.probe = probe
                     adapter.run(cache.test_ids).merge("probe" => probe.snapshot)
                   end

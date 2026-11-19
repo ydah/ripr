@@ -11,7 +11,7 @@ module Ripr
     class ResultCache
       attr_reader :baseline_env_hash, :source_hash, :test_hashes, :previous
 
-      def initialize(config, sources:, test_files:, framework:, mutants:, test_ids:)
+      def initialize(config, sources:, test_files:, framework:, mutants:, test_ids:, probe_sites:)
         @config = config
         @mutants = mutants
         @snapshot = Snapshot.new
@@ -26,7 +26,7 @@ module Ripr
         dependencies = auxiliary.sort.to_h { |path| [path, Digest::SHA256.file(path).hexdigest] }
         settings = config.to_h.slice(:operators, :arid_callees, :tests, :samples, :seed)
         @baseline_env_hash = digest([VERSION, RUBY_ENGINE, RUBY_VERSION, RUBY_PLATFORM, Dir.pwd,
-                                     Prism::VERSION, framework, settings, @source_hash, dependencies])
+                                     Prism::VERSION, framework, settings, @source_hash, dependencies, probe_sites.sort])
         @env_hash = digest([@baseline_env_hash, @test_hashes, test_ids.sort, config[:timeout], config[:jobs], config[:verify_not_infected]])
       end
 

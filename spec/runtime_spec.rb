@@ -245,6 +245,34 @@ RSpec.describe "mutation runtime" do
     expect(samples).to eq([["a" * 32, "x"], %w[b x], %w[c x]])
   end
 
+  it "stops checking operands after samples are full and the test has infected the mutation" do
+    start_probe
+    [18, 19, 20].each { |age| observe(age, 18) }
+    expected = Ripr::R.probe.snapshot
+    expect(expected.fetch("samples").fetch(site)).to eq([[18, 18], [19, 18], [20, 18]])
+    expect(expected.fetch("infect").fetch("adult-boundary")).to eq(["SampleTest#test_adult"])
+
+    expect(Ripr::Value).not_to receive(:pure?)
+    expect(observe(21, 18)).to be(true)
+    expect(Ripr::R.probe.snapshot).to eq(expected)
+  end
+
+  it "checks an operator again when a later test reaches the same site after a redefinition" do
+    start_probe
+    original = String.instance_method(:>)
+    left = +"20"
+    expect(observe(left, "18")).to be(true)
+    expect(Ripr::R.probe.snapshot.fetch("infect")).to be_empty
+
+    Ripr::R.current_test = "SampleTest#test_redefined"
+    String.alias_method(:>, :replace)
+    expect(observe(left, "18")).to be(true)
+    expect(left).to eq("20")
+    expect(Ripr::R.probe.snapshot.fetch("infect").fetch("adult-boundary")).to eq(["SampleTest#test_redefined"])
+  ensure
+    String.define_method(:>, original)
+  end
+
   it "can disable operand observations" do
     start_probe(samples: false)
     observe(20, 18)
@@ -259,6 +287,19 @@ RSpec.describe "mutation runtime" do
     snapshot = Ripr::R.probe.snapshot
     expect(snapshot.fetch("load_reached")).to eq([site])
     expect(snapshot.fetch("reach").fetch(site, [])).to be_empty
+  end
+
+  it "retains untracked reach outside the selected sites for cache invalidation" do
+    start_probe
+    Ripr::R.probe = Ripr::Probe.new({})
+    observe(18, 18)
+    Ripr::R.current_test = nil
+    observe(18, 18)
+    Ripr::R.ret("other-return", nil)
+    Ripr::R.on?("other-statement")
+    snapshot = Ripr::R.probe.snapshot
+    expect(snapshot.fetch("reach")).to be_empty
+    expect(snapshot.fetch("load_reached")).to eq([site, "other-return", "other-statement"])
   end
 
   it "attributes concurrent tests independently" do
