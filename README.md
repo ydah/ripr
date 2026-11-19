@@ -5,6 +5,7 @@
 </p>
 
 <p align="center">
+  <a href="https://rubygems.org/gems/ripr"><img alt="RubyGems version" src="https://img.shields.io/gem/v/ripr?label=RubyGems"></a>
   <a href="https://github.com/ydah/ripr/actions/workflows/main.yml"><img alt="Ruby CI" src="https://github.com/ydah/ripr/actions/workflows/main.yml/badge.svg?branch=main"></a>
   <a href="#installation"><img alt="CRuby 3.3 and later" src="https://img.shields.io/badge/CRuby-3.3%2B-CC342D"></a>
   <a href="LICENSE.txt"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue"></a>
@@ -23,10 +24,10 @@
 ripr requires CRuby 3.3 or later on Linux or macOS and a Minitest or RSpec suite. Add ripr to your project's Gemfile.
 
 ```ruby
-gem "ripr", git: "https://github.com/ydah/ripr.git", group: :test, require: false
+gem "ripr", "~> 0.1", group: :test, require: false
 ```
 
-Once ripr is available on RubyGems, use `gem "ripr", "~> 0.1", group: :test, require: false`.
+To install from GitHub, use `gem "ripr", git: "https://github.com/ydah/ripr.git", group: :test, require: false`.
 
 ## Quick start
 
