@@ -22,10 +22,11 @@ module Ripr
     end
 
     def call
-      command = %w[run list init accept init-skill].include?(@arguments.first) ? @arguments.shift : "run"
+      command = %w[run list init accept init-skill mcp].include?(@arguments.first) ? @arguments.shift : "run"
       @list_kind = @arguments.shift if command == "list" && %w[mutants operators].include?(@arguments.first)
       parser.parse!(@arguments)
       return 0 if @help
+      return mcp if command == "mcp"
 
       directory = @arguments.length == 1 && File.directory?(@arguments.first) &&
                   (File.directory?(File.join(@arguments.first, "test")) || File.directory?(File.join(@arguments.first, "spec")))
@@ -50,13 +51,13 @@ module Ripr
 
     def parser
       OptionParser.new do |options|
-        options.banner = "Usage: ripr [run|list|init|accept|init-skill] [options] [PATHS...]"
+        options.banner = "Usage: ripr [run|list|init|accept|init-skill|mcp] [options] [PATHS...]"
         options.on("--since REF") { |v| @overrides[:since] = v }
         options.on("--scope SCOPE") { |v| @overrides[:scope] = v }
         options.on("--framework FRAMEWORK") { |v| @overrides[:framework] = v }
         options.on("--tests GLOB") { |v| (@overrides[:tests] ||= []) << v }
         options.on("-j", "--jobs N", Integer) { |v| @overrides[:jobs] = v }
-        options.on("--operators LIST") { |v| @overrides[:operators] = v == "default" ? "default" : v.split(",") }
+        options.on("--operators LIST") { |v| @overrides[:operators] = %w[default full].include?(v) ? v : v.split(",") }
         options.on("--reporter NAME") { |v| (@overrides[:reporters] ||= []) << v }
         options.on("--report-dir DIR") { |v| @overrides[:report_dir] = v }
         options.on("--only IDS") { |v| @overrides[:only] = v.split(",") }
@@ -65,7 +66,9 @@ module Ripr
         options.on("--timeout-base MS", Float) { |v| (@overrides[:timeout] ||= {})["base_ms"] = v }
         options.on("--seed N", Integer) { |v| @overrides[:seed] = v }
         options.on("--no-samples") { @overrides[:samples] = false }
-        %w[full dry-run fail-on-survived verify-not-infected].each do |name|
+        options.on("--boot FILE") { |v| @overrides[:boot] = v }
+        options.on("--typecheck CHECKER") { |v| @overrides[:typecheck] = v }
+        %w[full dry-run fail-on-survived verify-not-infected verify-killed rails include-tests-diff static call-graph-reuse].each do |name|
           options.on("--#{name}") { @overrides[name.tr("-", "_").to_sym] = true }
         end
         options.on("--reason TEXT") { |v| @reason = v }
@@ -82,6 +85,15 @@ module Ripr
       end
     end
 
+    def mcp
+      unless @arguments.empty? && @overrides.empty? && !@reason && !@skill_dir && !@force
+        raise ArgumentError, "mcp runs from the current project directory without arguments"
+      end
+
+      require_relative "mcp_server"
+      MCPServer.new(stdin: $stdin, stdout: @stdout, stderr: @stderr).run
+    end
+
     def execute(command)
       config = Config.load(command == "list" ? @overrides.merge(dry_run: true) : @overrides)
       return init if command == "init"
@@ -89,7 +101,7 @@ module Ripr
       return accept(config) if command == "accept"
 
       if command == "list" && @list_kind == "operators"
-        @stdout.puts Core::Operators::NAMES
+        @stdout.puts config[:operators]
         return 0
       end
       raise ArgumentError, "#{command} is not available yet" unless %w[run list].include?(command)

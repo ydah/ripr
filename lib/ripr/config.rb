@@ -6,14 +6,16 @@ require_relative "core/operators"
 
 module Ripr
   class Config
-    YAML_KEYS = %w[include exclude framework tests scope jobs operators arid_callees thresholds timeout samples].freeze
+    YAML_KEYS = %w[include exclude framework tests scope jobs operators arid_callees thresholds timeout samples
+                   boot rails static typecheck].freeze
     DEFAULTS = {
       include: ["lib/**/*.rb"], exclude: ["lib/**/version.rb"], framework: "auto", tests: nil,
       scope: "node", jobs: Etc.nprocessors, operators: Core::Operators::NAMES,
       arid_callees: %w[logger.* puts pp warn], thresholds: { "high" => 80, "low" => 60, "break" => nil },
       timeout: { "factor" => 2.0, "base_ms" => 1000 }, samples: true,
       reporters: ["text"], report_dir: ".ripr/report", since: nil, only: [], full: false,
-      dry_run: false, fail_on_survived: false, verify_not_infected: false, seed: 0
+      dry_run: false, fail_on_survived: false, verify_not_infected: false, verify_killed: false, seed: 0, boot: nil, rails: false,
+      include_tests_diff: false, static: false, call_graph_reuse: false, typecheck: nil
     }.freeze
 
     def self.load(overrides = {}, path: ".ripr.yml")
@@ -26,6 +28,9 @@ module Ripr
 
       file_values = data.transform_keys(&:to_sym)
       values = DEFAULTS.merge(file_values).merge(overrides)
+      rails_boot = values[:boot] && %w[config/application.rb config/environment.rb].all? { |file| File.file?(file) }
+      values[:rails] = true if rails_boot && !file_values.key?(:rails) && !overrides.key?(:rails)
+      values[:include] += ["app/**/*.rb"] if values[:rails] && !file_values.key?(:include) && !overrides.key?(:include)
       %i[timeout thresholds].each do |key|
         next unless file_values.fetch(key, {}).is_a?(Hash) && overrides.fetch(key, {}).is_a?(Hash)
 
@@ -40,6 +45,7 @@ module Ripr
       @values = values
       @values[:jobs] = Etc.nprocessors if @values[:jobs] == "auto"
       @values[:operators] = Core::Operators::NAMES if @values[:operators] == "default"
+      @values[:operators] = Core::Operators::FULL_NAMES if @values[:operators] == "full"
       validate
     end
 
@@ -62,7 +68,7 @@ module Ripr
       %i[include exclude arid_callees operators reporters only].each do |key|
         raise ArgumentError, "#{key} must be a list of strings" unless self[key].is_a?(Array) && self[key].all?(String)
       end
-      unknown = self[:operators] - Core::Operators::NAMES
+      unknown = self[:operators] - Core::Operators::FULL_NAMES
       raise ArgumentError, "unknown operators: #{unknown.join(', ')}" unless unknown.empty?
 
       unknown = self[:reporters] - %w[text agent json html github]
@@ -82,9 +88,16 @@ module Ripr
       raise ArgumentError, "tests must be a glob string or a list" unless self[:tests].nil? || self[:tests].is_a?(String) ||
                                                                           (self[:tests].is_a?(Array) && self[:tests].all?(String))
 
-      %i[samples full dry_run fail_on_survived verify_not_infected].each do |key|
+      raise ArgumentError, "boot must be a file path" unless self[:boot].nil? || (self[:boot].is_a?(String) && !self[:boot].empty?)
+      raise ArgumentError, "typecheck must be sorbet or rbs" unless self[:typecheck].nil? || %w[sorbet rbs].include?(self[:typecheck])
+
+      %i[samples full dry_run fail_on_survived verify_not_infected verify_killed rails
+         include_tests_diff static call_graph_reuse].each do |key|
         raise ArgumentError, "#{key} must be true or false" unless [true, false].include?(self[key])
       end
+      return unless self[:include_tests_diff] && !self[:full] && (!self[:since] || self[:dry_run])
+
+      raise ArgumentError, "--include-tests-diff requires --since and a test run"
     end
 
     def finite?(value)

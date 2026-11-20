@@ -20,4 +20,17 @@ RSpec.describe Ripr::Config do
     expect { described_class.load({ thresholds: { "high" => 3.5 } }) }.to raise_error(ArgumentError)
     expect { described_class.load({ seed: "bad" }) }.to raise_error(ArgumentError)
   end
+
+  it "uses isolated Rails boot for an explicit boot file in a conventional Rails project" do
+    Dir.mktmpdir("ripr-rails-config") do |dir|
+      Dir.chdir(dir) do
+        Dir.mkdir("config")
+        File.write("config/application.rb", "")
+        File.write("config/environment.rb", "")
+        config = described_class.load({ boot: "config/environment.rb" })
+        expect(config[:rails]).to be(true)
+        expect(config[:include]).to include("app/**/*.rb")
+      end
+    end
+  end
 end

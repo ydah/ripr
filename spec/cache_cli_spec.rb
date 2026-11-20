@@ -113,6 +113,110 @@ RSpec.describe "incremental ripr commands" do
     end
   end
 
+  it "selects mutations reached by changed test files when requested" do
+    with_project do |directory|
+      source = File.join(directory, "lib/sample.rb")
+      File.open(source, "a") { |file| file.puts "module Sample; def self.other?(value); value >= 2; end; end" }
+      FileUtils.mkdir_p(File.join(directory, "checks"))
+      other_test = File.join(directory, "checks/other_test.rb")
+      File.write(other_test, <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+        class OtherTest < Minitest::Test
+          def test_other
+            assert Sample.other?(2)
+          end
+        end
+      RUBY
+      git(directory, "add", "lib", "test", "checks")
+      git(directory, "commit", "-qm", "independent tests")
+      options = ["--since", "HEAD", "--tests", "test/**/*_test.rb", "--tests", "./checks/**/*_test.rb"]
+
+      test = File.join(directory, "test/sample_test.rb")
+      File.write(test, File.read(test).sub("adult?(20)", "adult?(21)"))
+      report, = command(directory, *options)
+      expect(report.fetch("gaps")).to be_empty
+      command(directory, *options, "--include-tests-diff")
+      expect(snapshot(directory).fetch("mutants").values.map { |mutant| mutant.fetch("subject") }).to eq(["Sample.adult?"])
+
+      File.write(test, File.read(test).sub("assert Sample.adult?(21)", "assert true").sub("refute Sample.adult?(10)", "refute false"))
+      command(directory, *options, "--include-tests-diff")
+      expect(snapshot(directory).fetch("mutants").values.map { |mutant| mutant.values_at("subject", "status") })
+        .to eq([["Sample.adult?", "not_reached"]])
+
+      File.unlink(other_test)
+      command(directory, *options, "--include-tests-diff")
+      expect(snapshot(directory).fetch("mutants").values.map { |mutant| mutant.fetch("subject") })
+        .to contain_exactly("Sample.adult?", "Sample.other?")
+    end
+  end
+
+  it "reuses an independent result and invalidates callers of edited methods with call-graph reuse" do
+    with_project do |directory|
+      source = File.join(directory, "lib/sample.rb")
+      File.write(source, <<~RUBY)
+        module Sample
+          def self.callee(value)
+            value >= 18
+          end
+
+          def self.caller(value)
+            callee(value) && value >= 18
+          end
+
+          def self.independent(value)
+            value >= 5
+          end
+        end
+      RUBY
+      File.write(File.join(directory, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+        class SampleTest < Minitest::Test
+          def test_caller
+            assert Sample.caller(18)
+          end
+
+          def test_independent
+            assert Sample.independent(5)
+          end
+        end
+      RUBY
+
+      command(directory, "--call-graph-reuse")
+      File.write(source, File.read(source).sub("value >= 18", "value >= 17"))
+      command(directory, "--call-graph-reuse")
+      after = snapshot(directory)
+      expect(after.fetch("metrics")).to include("reused" => 1, "baseline_tests_run" => 2)
+      expect(after.fetch("mutants").values.select { |mutant| mutant["reused"] }.map { |mutant| mutant.fetch("subject") })
+        .to eq(["Sample.independent"])
+    end
+  end
+
+  it "reuses an independent RSpec result across method-body edits" do
+    with_project do |directory|
+      FileUtils.mkdir_p(File.join(directory, "spec"))
+      File.write(File.join(directory, "spec/sample_spec.rb"), <<~RUBY)
+        require_relative "../lib/sample"
+        RSpec.describe Sample do
+          it "exercises the adult boundary" do
+            Sample.adult?(18)
+            expect(Sample.adult?(20)).to be(true)
+          end
+          it("checks a different boundary") { expect(Sample.other?(5)).to be(true) }
+        end
+      RUBY
+      source = File.join(directory, "lib/sample.rb")
+      File.open(source, "a") { |file| file.puts "module Sample; def self.other?(value); value >= 5; end; end" }
+
+      command(directory, "--call-graph-reuse")
+      File.write(source, File.read(source).sub("value >= 5", "value >= 4"))
+      command(directory, "--call-graph-reuse")
+      reused = snapshot(directory).fetch("mutants").values.select { |mutant| mutant["reused"] }
+      expect(reused.map { |mutant| mutant.fetch("subject") }).to eq(["Sample.adult?"])
+    end
+  end
+
   it "observes only selected sites and refreshes evidence when the scope expands" do
     with_project do |directory|
       source = File.join(directory, "lib/sample.rb")

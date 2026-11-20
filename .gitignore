@@ -11,5 +11,6 @@
 /spec/reports/
 /tmp/
 Gemfile.lock
+/gemfiles/*.gemfile.lock
 .rspec_status
 *.gem

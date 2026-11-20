@@ -2,21 +2,26 @@
 
 require "digest"
 require "prism"
+require_relative "instrumenter"
 require_relative "operators"
 
 module Ripr
   module Core
     class Analyzer
       OPERATORS = Operators::NAMES
+      CONDITIONALS = [Prism::IfNode, Prism::UnlessNode, Prism::WhileNode, Prism::UntilNode].freeze
 
-      def self.call(source, path, operators: OPERATORS, arid_callees: %w[logger.* puts pp warn])
-        new(source, path, operators, arid_callees).call
+      def self.call(source, path, operators: OPERATORS, arid_callees: %w[logger.* puts pp warn], static: false)
+        new(source, path, operators, arid_callees, static).call
       end
 
-      def initialize(source, path, operators, arid_callees)
+      def initialize(source, path, operators, arid_callees, static)
         @source = source
         @path = path
         @operators = operators
+        @extended = @operators.intersect?(Operators::EXTRA_NAMES)
+        @include_static = static
+        @file_hash = Digest::SHA256.hexdigest(source) if static
         @arid_callees = arid_callees
         @sites = []
         @mutants = []
@@ -32,7 +37,7 @@ module Ripr
           @warnings << "#{@path}: #{parsed.errors.map(&:message).join('; ')}"
         else
           parsed.comments.each { |comment| disable(comment) }
-          discover(parsed.value, [], false)
+          discover(parsed.value, [], false, @include_static ? "root" : nil)
         end
         { sites: @sites, mutants: @mutants, warnings: @warnings, static: @static }
       end
@@ -51,16 +56,17 @@ module Ripr
         end
       end
 
-      def discover(node, namespace, singleton)
+      def discover(node, namespace, singleton, ast_path = nil, parent = nil)
         return if unsupported?(node)
+        return if @include_static && node.is_a?(Prism::DefinedNode)
 
         case node
         when Prism::ClassNode, Prism::ModuleNode
           name = node.constant_path.location.slice
           namespace = name.start_with?("::") ? [name.delete_prefix("::")] : [*namespace, name]
-          discover(node.body, namespace, false) if node.body
+          discover(node.body, namespace, false, ast_path && "#{ast_path}.body", node) if node.body
         when Prism::SingletonClassNode
-          discover(node.body, namespace, true) if node.body
+          discover(node.body, namespace, true, ast_path && "#{ast_path}.body", node) if node.body
         when Prism::DefNode
           if node.receiver && !node.receiver.is_a?(Prism::SelfNode)
             @warnings << "#{@path}:#{node.location.start_line}: skipped unsupported singleton receiver"
@@ -77,27 +83,47 @@ module Ripr
           last = node.body.body.last if node.body.is_a?(Prism::StatementsNode)
           add(last, "body.return", "return_nil", "nil", "value", last.location, context) if last && !control?(last)
         else
-          @static += Operators.for(node).length
-          children(node).each { |entry| discover(entry[1], namespace, singleton) }
+          discover_static(node, namespace, singleton, ast_path, parent)
+          children(node).each { |field, child| discover(child, namespace, singleton, ast_path && "#{ast_path}.#{field}", node) }
         end
       end
 
-      def walk(node, ast_path, context, depth)
+      def discover_static(node, namespace, singleton, ast_path, parent)
+        variants = operator_variants(node, parent)
+        unless @include_static
+          @static += variants.length
+          return
+        end
+
+        owner = namespace.empty? ? "Object" : namespace.join("::")
+        suffix = singleton ? "<singleton-body>" : "<load>"
+        context = { subject: "#{owner}::#{suffix}", method_hash: @file_hash, method_start: node.location.start_line,
+                    method_end: node.location.end_line, static: true }
+        variants.each do |operator, replacement, mode, location|
+          if @operators.include?(operator)
+            add(node, ast_path, operator, replacement, mode, location, context)
+          else
+            @static += 1
+          end
+        end
+        condition_variant(node, ast_path, context)
+        case_variants(node, ast_path, context)
+      end
+
+      def walk(node, ast_path, context, depth, parent = nil)
         return if unsupported?(node)
         # defined? inspects its operand's syntax without evaluating it.
         return if node.is_a?(Prism::DefinedNode)
 
         return discover(node, context[:subject].split(/[.#]/).first.split("::"), false) if node.is_a?(Prism::DefNode)
 
-        Operators.for(node).each do |operator, replacement, mode, location|
+        operator_variants(node, parent).each do |operator, replacement, mode, location|
           next if operator == "boolean_connector" && depth >= 3
 
           add(node, ast_path, operator, replacement, mode, location, context)
         end
-        if [Prism::IfNode, Prism::UnlessNode, Prism::WhileNode, Prism::UntilNode].any? { |klass| node.is_a?(klass) }
-          predicate = node.predicate
-          add(predicate, "#{ast_path}.predicate", "condition_negation", "!", "always", predicate.location, context)
-        end
+        case_variants(node, ast_path, context)
+        condition_variant(node, ast_path, context)
         if node.is_a?(Prism::StatementsNode)
           node.body[0...-1].each_with_index do |statement, index|
             next if control?(statement) || arid?(statement)
@@ -106,7 +132,35 @@ module Ripr
           end
         end
         next_depth = depth + (node.is_a?(Prism::AndNode) || node.is_a?(Prism::OrNode) ? 1 : 0)
-        children(node).each { |field, child| walk(child, "#{ast_path}.#{field}", context, next_depth) }
+        children(node).each { |field, child| walk(child, "#{ast_path}.#{field}", context, next_depth, node) }
+      end
+
+      def operator_variants(node, parent)
+        return [] if @extended && node.is_a?(Prism::StringNode) && parent.is_a?(Prism::InterpolatedStringNode)
+
+        Operators.for(node, extended: @extended)
+      end
+
+      def condition_variant(node, ast_path, context)
+        return unless CONDITIONALS.any? { |klass| node.is_a?(klass) }
+
+        predicate = node.predicate
+        add(predicate, "#{ast_path}.predicate", "condition_negation", "!", "always", predicate.location, context)
+      end
+
+      def case_variants(node, ast_path, context)
+        return unless node.is_a?(Prism::CaseNode) && @operators.include?("case_when")
+
+        replacement = node.predicate ? "->(*) { false }" : "false"
+        node.conditions.each_with_index do |branch, branch_index|
+          branch.conditions.each_with_index do |condition, index|
+            next if condition.is_a?(Prism::SplatNode) || condition.is_a?(Prism::MatchLastLineNode)
+            next if condition.location.start_line != condition.location.end_line || condition.location.slice == replacement
+
+            add(condition, "#{ast_path}.conditions.#{branch_index}.conditions.#{index}", "case_when", replacement, "unknown",
+                condition.location, context)
+          end
+        end
       end
 
       def control?(node)
@@ -161,11 +215,11 @@ module Ripr
         accepted = reason && (reason[0].empty? || reason[0].include?(operator)) ? reason[1] : nil
         mutant = context.merge(id: Digest::SHA256.hexdigest(full_id)[0, 10], full_id: full_id, site: key,
                                operator: operator, replacement: replacement, mode: mode, original: original, mutated: mutated,
-                               accepted: accepted, location: { file: @path, line: node.location.start_line,
-                                                               column: node.location.start_column + 1, end_line: node.location.end_line,
-                                                               end_column: node.location.end_column + 1 })
-        candidate = @source.byteslice(0, node.location.start_offset) + mutated + @source.byteslice(node.location.end_offset..)
-        mutant[:invalid] = true if Prism.parse(candidate).failure?
+                               accepted: accepted, start_offset: node.location.start_offset, end_offset: node.location.end_offset,
+                               location: { file: @path, line: node.location.start_line,
+                                           column: node.location.start_column + 1, end_line: node.location.end_line,
+                                           end_column: node.location.end_column + 1 })
+        mutant[:invalid] = true if Prism.parse(Instrumenter.mutate(@source, mutant)).failure?
         @mutants << mutant
         site = @sites.find { |entry| entry[:key] == key }
         unless site

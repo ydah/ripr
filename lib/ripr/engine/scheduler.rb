@@ -5,13 +5,15 @@ require_relative "child"
 module Ripr
   module Engine
     class Scheduler
-      def initialize(config, baseline, table, cache, warnings:, metrics:)
+      def initialize(config, baseline, table, cache, warnings:, metrics:, rails: nil, static_run: nil)
         @config = config
         @baseline = baseline
         @table = table
         @cache = cache
         @warnings = warnings
         @metrics = metrics
+        @rails = rails
+        @static_run = static_run
       end
 
       def call(selected, adapter, &progress)
@@ -30,12 +32,12 @@ module Ripr
           data = mutant.merge("load_reached" => unknown_reach,
                               "observed" => probe.fetch("samples").fetch(mutant.fetch("site"), []),
                               "covering_tests" => reach.filter_map { |id| @baseline.fetch("tests")[id]&.merge("id" => id) })
-          cached = @cache.result_for(mutant) unless %w[accepted invalid].include?(status)
+          cached = @cache.result_for(mutant, probe: probe) unless %w[accepted invalid].include?(status)
           verify = %w[not_reached not_infected].include?(status) &&
                    (!@config[:only].empty? || (@config[:verify_not_infected] && status == "not_infected"))
           if cached
             @metrics["reused"] += 1
-            cached.merge("load_reached" => unknown_reach)
+            cached.merge(data)
           elsif status && !verify
             data.merge("status" => status)
           else
@@ -54,27 +56,69 @@ module Ripr
         cost = lambda do |mutant|
           mutant.fetch("test_ids").sum { |id| @baseline.fetch("tests").fetch(id).fetch("duration_ms") }
         end
-        timeout = ->(mutant) { @config[:timeout].fetch("base_ms") + (@config[:timeout].fetch("factor") * cost.call(mutant)) }
-        completed = Child.batch(ready.sort_by(&cost), jobs: @config[:jobs], timeout: timeout, on_complete: progress) do |mutant|
-          site_ids = @table.fetch(mutant.fetch("site"))
-          R.activate(mutant.fetch("site"), site_ids.index(mutant.fetch("id")) + 1)
-          adapter.run(mutant.fetch("test_ids"), fail_fast: true)
+        timeout = lambda do |mutant|
+          boot_ms = mutant["static"] ? 2 * @static_run.boot_ms : 0
+          @config[:timeout].fetch("base_ms") + (@config[:timeout].fetch("factor") * cost.call(mutant)) +
+            boot_ms + (@rails&.worker_timeout_ms || 0)
         end
+        completed = Child.batch(ready.sort_by(&cost), jobs: @config[:jobs], timeout: timeout, on_complete: progress) do |mutant, slot|
+          execute(mutant, slot, adapter)
+        end
+        originals = @config[:verify_killed] ? verify_kills(completed, adapter, timeout) : {}
         completed.each do |mutant, outcome|
           status = outcome["status"] || (outcome["success"] ? "not_detected" : "killed")
+          failure = outcome["failures"]&.first
+          error = outcome["error"]
+          if (original = originals[mutant]) && !original["success"]
+            status = "error"
+            failure = nil
+            detail = original.dig("failures", 0, "message") || original["error"] || original["status"]
+            error = "could not verify kill #{mutant.fetch('id')} on original code#{" (#{detail})" if detail}"
+            @warnings << error
+          end
           verification = mutant["verification_status"]
           if verification
             status = verification if outcome["success"]
             @warnings << "verification discrepancy #{mutant.fetch('id')}: expected #{verification}, got killed" if status == "killed"
           end
-          failure = outcome["failures"]&.first
           result = mutant.except("test_ids", "verification_status").merge("status" => status,
                                                                           "killed_by" => failure.is_a?(Hash) ? failure["id"] : failure,
-                                                                          "error" => outcome["error"])
+                                                                          "error" => error)
           result["verified"] = true if verification
+          result["dependency_hashes"] = outcome["dependency_hashes"] if outcome["dependency_hashes"]
           results << result
         end
         results.sort_by { |mutant| mutant.fetch("full_id") }
+      end
+
+      private
+
+      def execute(mutant, slot, adapter, original: false)
+        tests = mutant.fetch("test_ids")
+        run = lambda do
+          if mutant["static"]
+            @static_run.call(original ? nil : mutant.fetch("full_id"), tests)
+          else
+            unless original
+              site = mutant.fetch("site")
+              R.activate(site, @table.fetch(site).index(mutant.fetch("id")) + 1)
+            end
+            if @cache.graph && !original
+              result, dependencies = @cache.graph.trace { adapter.run(tests, fail_fast: true) }
+              result.merge("dependency_hashes" => @cache.graph.signature(dependencies))
+            else
+              adapter.run(tests, fail_fast: true)
+            end
+          end
+        end
+        @rails ? @rails.with_worker(slot, fresh_boot: mutant["static"] == true, &run) : run.call
+      end
+
+      def verify_kills(completed, adapter, timeout)
+        killed = completed.filter_map { |mutant, result| mutant if !result["status"] && !result["success"] }
+        Child.batch(killed, jobs: @config[:jobs], timeout: timeout) do |mutant, slot|
+          execute(mutant, slot, adapter, original: true)
+        end.to_h
       end
     end
   end

@@ -13,11 +13,12 @@ module Ripr
         pending = tasks.dup
         active = {}
         completed = []
+        slots = (0...[jobs, tasks.length].min).to_a.reverse
         on_complete&.call(0, tasks.length)
         until pending.empty? && active.empty?
           while active.length < jobs && !pending.empty?
             task = pending.shift
-            state = spawn_child(task, timeout.call(task), &)
+            state = spawn_child(task, timeout.call(task), slots.pop, &)
             active[state.fetch(:reader)] = state
           end
           ready = IO.select(active.keys, nil, nil, 0.01)&.first || []
@@ -34,6 +35,7 @@ module Ripr
             completed << [state.fetch(:task), payload]
             active.delete(state.fetch(:reader))
             state.fetch(:reader).close
+            slots << state.fetch(:slot)
             on_complete&.call(completed.length, tasks.length)
           end
         end
@@ -50,7 +52,7 @@ module Ripr
         end
       end
 
-      def self.spawn_child(task, timeout_ms)
+      def self.spawn_child(task, timeout_ms, slot)
         reader, writer = IO.pipe
         pid = fork do
           reader.close
@@ -58,7 +60,7 @@ module Ripr
           $stdout.reopen(File::NULL, "w")
           $stderr.reopen(File::NULL, "w")
           payload = begin
-            yield(task)
+            yield(task, slot)
           rescue Exception => e # rubocop:disable Lint/RescueException -- Test code may raise SystemExit or a framework Exception subclass.
             { "status" => "error", "error" => "#{e.class}: #{e.message}" }
           end
@@ -67,7 +69,7 @@ module Ripr
           exit! 0
         end
         writer.close
-        { task: task, pid: pid, reader: reader, buffer: +"", deadline: monotonic + (timeout_ms / 1000.0) }
+        { task: task, slot: slot, pid: pid, reader: reader, buffer: +"", deadline: monotonic + (timeout_ms / 1000.0) }
       end
 
       def self.drain(state)

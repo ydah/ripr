@@ -7,8 +7,19 @@ module Ripr
       ARITHMETIC = { :+ => "-", :- => "+", :* => "/", :/ => "*", :% => "*" }.freeze
       NAMES = %w[comparison arithmetic integer_literal boolean_literal condition_negation boolean_connector return_nil
                  statement_removal].freeze
+      EXTRA_NAMES = %w[string_literal regexp_literal collection_literal collection_method safe_navigation compound_assignment
+                       case_when].freeze
+      FULL_NAMES = (NAMES + EXTRA_NAMES).freeze
+      COLLECTION_METHODS = { first: "last", last: "first" }.freeze
 
-      def self.for(node)
+      def self.for(node, extended: false)
+        variants = default_variants(node)
+        variant = extended_variant(node) if extended
+        variants << variant if variant
+        variants
+      end
+
+      def self.default_variants(node)
         case node
         when Prism::CallNode
           return [] unless node.receiver && node.arguments&.arguments&.length == 1 && !node.call_operator_loc && !node.block
@@ -36,6 +47,42 @@ module Ripr
           []
         end
       end
+
+      def self.extended_variant(node)
+        location = node.location
+        # shortcut: switch single-line expressions, extend when both branches can preserve multiline locations.
+        return if location.start_line != location.end_line
+
+        case node
+        when Prism::StringNode
+          return unless node.opening_loc && node.closing_loc && !node.opening_loc.slice.start_with?("<<")
+
+          ["string_literal", node.unescaped.empty? ? '" "' : '""', "unknown", location]
+        when Prism::RegularExpressionNode
+          return if node.content_loc.slice.match?(/\(\?[<']/) || location.slice == "/(?!)/"
+
+          ["regexp_literal", "/(?!)/", "unknown", location]
+        when Prism::ArrayNode, Prism::HashNode
+          return unless node.opening_loc && !node.elements.empty?
+
+          ["collection_literal", node.is_a?(Prism::ArrayNode) ? "[]" : "{}", "unknown", location]
+        when Prism::CallNode
+          return if node.block
+
+          operator = node.call_operator_loc&.slice
+          if operator == "&."
+            ["safe_navigation", ".", "unknown", node.call_operator_loc]
+          elsif operator == "." && COLLECTION_METHODS.key?(node.name)
+            ["collection_method", COLLECTION_METHODS.fetch(node.name), "unknown", node.message_loc]
+          end
+        else
+          return unless node.respond_to?(:binary_operator_loc) && ARITHMETIC.key?(node.binary_operator)
+
+          ["compound_assignment", "#{ARITHMETIC.fetch(node.binary_operator)}=", "unknown", node.binary_operator_loc]
+        end
+      end
+
+      private_class_method :default_variants, :extended_variant
     end
   end
 end

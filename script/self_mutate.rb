@@ -67,7 +67,8 @@ Dir.mktmpdir("ripr-self-mutate") do |directory|
     RUBY
     system(environment, RbConfig.ruby, "-e", check, chdir: root)
   else
-    tests = %w[spec/core_analysis_spec.rb spec/incremental_spec.rb spec/engine_spec.rb spec/reporters_spec.rb spec/config_spec.rb]
+    tests = %w[spec/core_analysis_spec.rb spec/call_graph_spec.rb spec/incremental_spec.rb spec/engine_spec.rb
+               spec/reporters_spec.rb spec/config_spec.rb]
     arguments = tests.flat_map { |path| ["--tests", path] }
     system(environment, RbConfig.ruby, File.join(root, "exe/ripr"), "--full", "--framework", "rspec",
            "--reporter", "agent", "--report-dir", ".ripr/self-application", "--jobs", "2", "--no-samples",

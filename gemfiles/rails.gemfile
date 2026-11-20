@@ -1,0 +1,15 @@
+# frozen_string_literal: true
+
+source "https://rubygems.org"
+
+gemspec path: ".."
+
+gem "bootsnap", ">= 1.18", require: false
+gem "minitest", ">= 5", "< 7"
+gem "rails", "~> 8.1", require: false
+gem "rspec", "~> 3.0"
+gem "spring", "~> 4.0", require: false
+gem "sqlite3", ">= 2.1", require: false
+
+gem "mysql2", ">= 0.5", require: false if ENV["RIPR_TEST_MYSQL"]
+gem "pg", ">= 1.5", require: false if ENV["RIPR_TEST_POSTGRESQL"]

@@ -9,6 +9,10 @@ module Ripr
         new(source, path, sites).call
       end
 
+      def self.mutate(source, mutant)
+        source.byteslice(0, mutant.fetch(:start_offset)) + mutant.fetch(:mutated) + source.byteslice(mutant.fetch(:end_offset)..)
+      end
+
       def initialize(source, path, sites)
         @source = source
         @path = path
@@ -64,7 +68,7 @@ module Ripr
         sites = @by_node.fetch([location.start_offset, location.end_offset, node.type], [])
         priority = %w[comparison arithmetic integer_literal boolean_literal boolean_connector condition_negation statement_removal
                       return_nil]
-        sites.sort_by { |site| priority.index(site[:operator]) }.each do |site|
+        sites.sort_by { |site| priority.index(site[:operator]) || priority.length }.each do |site|
           text = wrap(site, node, text, rendered)
         end
         text
@@ -89,6 +93,8 @@ module Ripr
           right = rendered.fetch(node.right.node_id)
           replacement = site[:variants].first[:replacement]
           "(::Ripr::R.on?(#{key}) ? ((#{left}) #{replacement} (#{right})) : (#{text}))"
+        else
+          "(::Ripr::R.on?(#{key}) ? (#{site[:variants].first.fetch(:mutated)}) : (#{text}))"
         end
       end
 

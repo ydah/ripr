@@ -49,6 +49,21 @@ RSpec.describe Ripr::Reporters do
     expect(gap.fetch("rerun")).to eq("ripr --only a123456789")
   end
 
+  it "includes the planning flags when offering a rerun for a static extra operator" do
+    entry = mutant.merge("operator" => "string_literal", "status" => "not_detected", "static" => true, "load_reached" => true)
+    gap = described_class.agent([entry], {}).fetch("gaps").first
+    expect(gap.fetch("rerun")).to eq("ripr --only a123456789 --static --operators string_literal")
+    expect(gap.fetch("accept")).to eq('ripr accept a123456789 --static --operators string_literal --reason "..."')
+    expect(gap.fetch("hint")).to include("fresh process")
+  end
+
+  it "preserves boot options in agent commands" do
+    config = Ripr::Config.load({ rails: true, boot: "config/test environment.rb" })
+    gap = described_class.agent([mutant], {}, config: config).fetch("gaps").first
+    expect(gap.fetch("rerun")).to eq('ripr --only a123456789 --rails --boot config/test\ environment.rb')
+    expect(gap.fetch("accept")).to include('--rails --boot config/test\ environment.rb')
+  end
+
   it "validates the agent protocol and rejects contradictory actions" do
     schema = JSONSchemer.schema(JSON.parse(File.read(File.expand_path("../schema/agent-v1.json", __dir__))))
     report = described_class.agent([mutant], { "since" => nil, "scope" => "node", "framework" => "minitest" })

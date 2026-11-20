@@ -72,6 +72,140 @@ RSpec.describe "ripr command" do
     end
   end
 
+  it "replays the selected tests on original code to distinguish false kills" do
+    Dir.mktmpdir("ripr-verify-killed") do |dir|
+      FileUtils.mkdir_p(File.join(dir, "lib"))
+      FileUtils.mkdir_p(File.join(dir, "test"))
+      File.write(File.join(dir, "lib/sample.rb"), <<~RUBY)
+        module Sample
+          def self.shared = true
+          def self.independent = true
+        end
+      RUBY
+      File.write(File.join(dir, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+
+        class SampleTest < Minitest::Test
+          def test_a_prepare
+            $prepared = true
+          end
+
+          def test_b_shared
+            assert $prepared, "missing setup from another test"
+            assert Sample.shared
+          end
+
+          def test_c_independent
+            assert Sample.independent
+          end
+        end
+      RUBY
+
+      stdout, stderr, status = command("--full", "--operators", "boolean_literal", "--reporter", "agent", directory: dir)
+      expect(status.exitstatus).to eq(0), stderr
+      expect(JSON.parse(stdout).fetch("summary").fetch("killed")).to eq(2)
+
+      stdout, stderr, status = command("--full", "--operators", "boolean_literal", "--reporter", "agent", "--verify-killed", directory: dir)
+      expect(status.exitstatus).to eq(0), stderr
+      expect(JSON.parse(stdout).fetch("summary")).to include("killed" => 1, "error" => 1)
+      expect(stderr).to include("original code", "missing setup from another test")
+    end
+  end
+
+  it "loads a project boot file after installing mutation switches without mixing its output into reports" do
+    Dir.mktmpdir("ripr-boot") do |dir|
+      FileUtils.cp_r(File.join(fixture, "."), dir)
+      File.write(File.join(dir, "boot.rb"), <<~RUBY)
+        puts "booted fixture"
+        require_relative "lib/sample"
+        RIPR_BOOTED = true
+      RUBY
+      File.open(File.join(dir, "test/sample_test.rb"), "a") do |file|
+        file.puts <<~RUBY
+          class SampleTest
+            def test_boot_ran
+              assert RIPR_BOOTED
+            end
+          end
+        RUBY
+      end
+
+      stdout, stderr, status = command("--full", "--boot", "boot.rb", "--reporter", "agent", directory: dir)
+      expect(status.exitstatus).to eq(0), stderr
+      expect(stderr).to include("booted fixture")
+      report = JSON.parse(stdout)
+      expect(report.fetch("summary").fetch("killed")).to be >= 2
+      expect(report.dig("run", "metrics", "baseline_tests_run")).to eq(3)
+    end
+  end
+
+  it "activates static mutations before requiring their file in a fresh process" do
+    Dir.mktmpdir("ripr-static") do |dir|
+      FileUtils.mkdir_p(File.join(dir, "lib"))
+      FileUtils.mkdir_p(File.join(dir, "test"))
+      File.write(File.join(dir, "lib/sample.rb"), "module Sample; COUNT = 1; end\n")
+      File.write(File.join(dir, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+        at_exit { STDOUT.puts "finishing a static mutation" } unless Sample::COUNT == 1
+        class SampleTest < Minitest::Test
+          def test_uses_count
+            STDOUT.puts "checking a load-time constant"
+            assert_equal 1, Sample::COUNT
+          end
+        end
+      RUBY
+
+      stdout, stderr, status = command("--static", "--operators", "integer_literal", "--reporter", "agent", directory: dir)
+      expect(status.exitstatus).to eq(0), stderr
+      expect(JSON.parse(stdout).fetch("summary")).to include("killed" => 2, "static" => 0)
+      snapshot = JSON.parse(File.read(File.join(dir, ".ripr/snapshot.json")))
+      expect(snapshot.fetch("mutants").values).to all(include("static" => true, "status" => "killed"))
+    end
+  end
+
+  it "lists the extra operators when the full operator profile is selected" do
+    stdout, stderr, status = command("list", "operators", "--operators", "full")
+    expect(status.exitstatus).to eq(0), stderr
+    expect(stdout.lines.map(&:chomp)).to include("string_literal", "regexp_literal", "collection_literal", "safe_navigation")
+  end
+
+  it "checks directly mutated source and excludes mutations rejected by a type checker" do
+    Dir.mktmpdir("ripr-typed") do |dir|
+      FileUtils.mkdir_p([File.join(dir, "lib"), File.join(dir, "test"), File.join(dir, "bin")])
+      File.write(File.join(dir, "Gemfile"), "source 'https://rubygems.org'\n")
+      source = File.join(dir, "lib/sample.rb")
+      File.write(source, "module Sample; def self.label; 'label'; end; end\n")
+      File.write(File.join(dir, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+        class SampleTest < Minitest::Test
+          def test_label
+            assert_equal "label", Sample.label
+          end
+        end
+      RUBY
+      bundle = File.join(dir, "bin/bundle")
+      File.write(bundle, <<~SH)
+        #!/bin/sh
+        test "$*" = "exec srb tc" || exit 1
+        if grep -q '; nil)' lib/sample.rb; then
+          echo 'lib/sample.rb:1: Expected String, found NilClass'
+          exit 100
+        fi
+      SH
+      File.chmod(0o700, bundle)
+      env = { "PATH" => "#{File.join(dir, 'bin')}#{File::PATH_SEPARATOR}#{ENV.fetch('PATH')}" }
+      stdout, stderr, status = command("--typecheck", "sorbet", "--operators", "return_nil", "--reporter", "agent",
+                                       directory: dir, env: env)
+      expect(status.exitstatus).to eq(0), stderr
+      expect(JSON.parse(stdout).fetch("summary")).to include("invalid" => 1, "killed" => 0)
+      expect(stderr).to include("Expected String")
+      expect(File.read(source)).to eq("module Sample; def self.label; 'label'; end; end\n")
+    end
+  end
+
   it "kills arithmetic mutations when tests catch an exception from the original operator" do
     Dir.mktmpdir("ripr-exception") do |dir|
       FileUtils.mkdir_p(File.join(dir, "lib"))

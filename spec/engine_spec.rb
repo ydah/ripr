@@ -21,6 +21,13 @@ RSpec.describe "mutation execution" do
     expect(result.fetch("value").size).to eq(200_000)
   end
 
+  it "assigns a different database slot to each concurrent worker" do
+    result = Ripr::Engine::Child.batch([1, 2], jobs: 2, timeout: ->(_) { 1000 }) do |_task, slot|
+      { "slot" => slot }
+    end
+    expect(result.map { |_, outcome| outcome.fetch("slot") }).to contain_exactly(0, 1)
+  end
+
   it "kills timed out children and reports abrupt exits" do
     result = Ripr::Engine::Child.call(timeout_ms: 30) { loop { sleep 1 } }
     expect(result.fetch("status")).to eq("timeout")

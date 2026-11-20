@@ -1,0 +1,8 @@
+<% if ENV['RIPR_TEST_DATABASE_URL'] %>
+test:
+  url: <%= ENV.fetch('RIPR_TEST_DATABASE_URL').inspect %>
+<% else %>
+test:
+  adapter: sqlite3
+  database: test.sqlite3
+<% end %>

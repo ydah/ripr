@@ -4,7 +4,9 @@ require "json"
 require "cgi"
 require "fileutils"
 require "pathname"
+require "shellwords"
 require_relative "core/classifier"
+require_relative "core/operators"
 
 module Ripr
   module Reporters
@@ -16,11 +18,12 @@ module Ripr
     }.freeze
     LOAD_NOTE = "Reached outside a tracked test, possibly during loading or in a background thread. " \
                 "Switching cannot change effects already computed before test execution."
+    STATIC_NOTE = "This mutation is active before the source loads in a fresh process."
     MTE_STATUSES = { "killed" => "Killed", "timeout" => "Timeout", "error" => "RuntimeError", "not_reached" => "NoCoverage",
                      "not_infected" => "Survived", "not_detected" => "Survived", "accepted" => "Ignored",
                      "static" => "Ignored", "invalid" => "CompileError", "planned" => "Pending" }.freeze
 
-    def self.agent(results, run, summary = Core::Classifier.summary(results))
+    def self.agent(results, run, summary = Core::Classifier.summary(results), config: nil)
       gaps = results.filter_map do |mutant|
         status = mutant.fetch("status")
         next unless ACTIONS.key?(status)
@@ -29,11 +32,17 @@ module Ripr
         hint = HINTS.fetch(status)
         observed = mutant.fetch("observed", [])
         hint += " Observed operands: #{JSON.generate(observed)}." if status == "not_infected" && !observed.empty?
-        hint += " #{LOAD_NOTE}" if mutant["load_reached"]
+        hint += " #{load_note(mutant)}" if mutant["load_reached"]
+        flags = ""
+        flags += " --rails" if config && config[:rails]
+        flags += " --boot #{Shellwords.escape(config[:boot])}" if config && config[:boot]
+        flags += " --static" if mutant["static"]
+        operator = mutant.fetch("operator")
+        flags += " --operators #{operator}" if Core::Operators::EXTRA_NAMES.include?(operator)
         mutant.slice("id", "full_id", "location", "subject", "operator", "original", "mutated", "observed", "covering_tests",
                      "load_reached")
               .merge("kind" => status, "action" => ACTIONS.fetch(status), "hint" => hint,
-                     "rerun" => "ripr --only #{id}", "accept" => "ripr accept #{id} --reason \"...\"")
+                     "rerun" => "ripr --only #{id}#{flags}", "accept" => "ripr accept #{id}#{flags} --reason \"...\"")
       end
       { "schema" => "ripr.agent/v1", "run" => run, "summary" => summary, "gaps" => gaps }
     end
@@ -42,8 +51,8 @@ module Ripr
       files = sources.to_h do |path, source|
         mutants = results.select { |m| m.fetch("location").fetch("file") == path }.map do |mutant|
           location = mutant.fetch("location")
-          reason = mutant["accepted"] || mutant.fetch("status")
-          reason += ". #{LOAD_NOTE}" if mutant["load_reached"]
+          reason = mutant["accepted"] || mutant["invalid_reason"] || mutant["error"] || mutant.fetch("status")
+          reason += ". #{load_note(mutant)}" if mutant["load_reached"]
           { "id" => mutant.fetch("id"), "mutatorName" => mutant.fetch("operator"), "replacement" => mutant.fetch("mutated"),
             "status" => MTE_STATUSES.fetch(mutant.fetch("status")), "statusReason" => reason,
             "location" => { "start" => { "line" => location.fetch("line"), "column" => location.fetch("column") },
@@ -72,10 +81,10 @@ module Ripr
             stdout.puts "#{mutant['status'].tr('_', ' ')} #{location['file']}:#{location['line']}:#{location['column']} " \
                         "#{mutant['original'].inspect} → #{mutant['mutated'].inspect} id=#{mutant['id']}"
             stdout.puts "  observed: #{JSON.generate(mutant['observed'])}" unless mutant.fetch("observed", []).empty?
-            stdout.puts "  #{LOAD_NOTE}" if mutant["load_reached"]
+            stdout.puts "  #{load_note(mutant)}" if mutant["load_reached"]
           end
         when "agent"
-          stdout.puts JSON.generate(agent(results, run, summary))
+          stdout.puts JSON.generate(agent(results, run, summary, config: config))
         when "github"
           results.each do |mutant|
             next unless ACTIONS.key?(mutant["status"])
@@ -87,7 +96,7 @@ module Ripr
             end
             file = annotation(path, property: true)
             message = "#{mutant['original']} → #{mutant['mutated']}"
-            message += ". #{LOAD_NOTE}" if mutant["load_reached"]
+            message += ". #{load_note(mutant)}" if mutant["load_reached"]
             message = annotation(message)
             stdout.puts "::warning file=#{file},line=#{location['line']},col=#{location['column']}," \
                         "title=ripr #{mutant['status']}::#{message}"
@@ -105,6 +114,10 @@ module Ripr
     def self.annotation(value, property: false)
       escaped = value.gsub("%", "%25").gsub("\r", "%0D").gsub("\n", "%0A")
       property ? escaped.gsub(":", "%3A").gsub(",", "%2C") : escaped
+    end
+
+    def self.load_note(mutant)
+      mutant["static"] ? STATIC_NOTE : LOAD_NOTE
     end
 
     def self.html(report)

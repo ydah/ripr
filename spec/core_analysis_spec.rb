@@ -80,6 +80,32 @@ RSpec.describe "Core source analysis" do
     expect(result.fetch(:mutants).length).to eq(4)
   end
 
+  it "plans and directly rewrites all extended operator kinds and load-time literals" do
+    source = <<~RUBY
+      LIMIT = 3
+      WORD = "ready"
+      if true; LABEL = "on"; end
+      def value(items, count)
+        count += 2
+        case count
+        when 3 then ["ready", /pattern/, {key: items&.first}, items.first]
+        else []
+        end
+      end
+    RUBY
+    operators = Ripr::Core::Operators::EXTRA_NAMES + %w[integer_literal condition_negation]
+    analysis = Ripr::Core::Analyzer.call(source, "lib/example.rb", operators: operators, static: true)
+    mutants = analysis.fetch(:mutants)
+    expect(mutants.map { |mutant| mutant.fetch(:operator) }.uniq).to match_array(operators)
+    expect(mutants.select { |mutant| mutant[:static] }.map { |mutant| mutant.fetch(:original) }.uniq).to include('"ready"', "3", "true")
+    mutants.each do |mutant|
+      mutated = Ripr::Core::Instrumenter.mutate(source, mutant)
+      expect(mutated).not_to eq(source)
+      expect(Prism.parse(mutated)).to be_success
+    end
+    expect(instrument(source, analysis).fetch(:invalid)).to be_empty
+  end
+
   it "excludes dynamic method definitions and singleton receivers with diagnostics" do
     source = "define_method(:value) { 1 }\nclass << object\n def value; 2; end\nend\ndef object.value; 3; end\n"
     result = analyze(source)

@@ -9,7 +9,7 @@ module Ripr
       @root = File.expand_path(root)
     end
 
-    def changed_lines(ref, paths = nil)
+    def changed_lines(ref, paths = nil, include_all_paths: false)
       base = execute("merge-base", "--", ref, "HEAD").strip
       selected = Array(paths)
       entries = execute("diff", "--relative", "--name-status", "-z", "--find-renames", base, "--", *selected).split("\0")
@@ -18,20 +18,21 @@ module Ripr
         status = entries.shift
         original = entries.shift
         destination = status.start_with?("R", "C") ? entries.shift : original
+        changed[original] = [] if include_all_paths && status.start_with?("D", "R")
         next if status.start_with?("D") || !File.file?(File.join(@root, destination))
 
         diff_paths = status.start_with?("R", "C") ? [original, destination] : [destination]
         diff = execute("diff", "--relative", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames", base, "--",
                        *diff_paths)
         lines = hunk_lines(diff)
-        changed[destination] = lines unless lines.empty?
+        changed[destination] = lines if include_all_paths || !lines.empty?
       end
       execute("ls-files", "--others", "--exclude-standard", "-z", "--", *selected).split("\0").each do |path|
         absolute = File.join(@root, path)
         next unless File.file?(absolute)
 
         lines = File.binread(absolute).lines.count
-        changed[path] = (1..lines).to_a unless lines.zero?
+        changed[path] = (1..lines).to_a if include_all_paths || !lines.zero?
       end
       changed
     end
