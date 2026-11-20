@@ -87,6 +87,13 @@ RSpec.describe Ripr::Core::CallGraph do
     expect(dependencies).to be_nil
   end
 
+  it "refuses a file encoding change that can inspect a byte order mark" do
+    File.open(__FILE__, "rb") do |file|
+      _, dependencies = graph(source).trace { file.set_encoding("bom|utf-8") }
+      expect(dependencies).to be_nil
+    end
+  end
+
   it "permits RSpec to read option files and still rejects any file read by their ERB code" do
     current = graph(source)
     Dir.mktmpdir do |directory|
