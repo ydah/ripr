@@ -11,6 +11,64 @@ permissions:
   contents: read
 
 jobs:
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Check workflow syntax
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$(go env GOPATH)/bin/actionlint"
+      - uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          advanced-security: false
+
+  rails:
+    runs-on: ubuntu-latest
+    env:
+      BUNDLE_GEMFILE: gemfiles/rails.gemfile
+      RIPR_TEST_RAILS: '1'
+      RIPR_TEST_POSTGRESQL: postgresql://postgres:ripr_ci@127.0.0.1:8432/ripr_pg_test
+      RIPR_TEST_MYSQL: mysql2://root:ripr_ci@127.0.0.1:8336/ripr_mysql_test
+    services:
+      postgres:
+        image: postgres:16@sha256:3950ad7c3148ca2175ef1b6c36c9efbf78957ae8fbe8b3a5d7c35af50500382f
+        env:
+          POSTGRES_PASSWORD: ripr_ci
+          POSTGRES_DB: ripr_pg_test
+        ports:
+          - 8432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ripr_pg_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      mysql:
+        image: mysql:8.4@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+        env:
+          MYSQL_ROOT_PASSWORD: ripr_ci
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: ripr_mysql_test
+        ports:
+          - 8336:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 --silent"
+          --health-interval 5s --health-timeout 3s --health-retries 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install database clients
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16 mysql-client libmysqlclient-dev
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1
+        with:
+          ruby-version: '4.0'
+          bundler-cache: true
+      - name: Test Rails database isolation
+        run: bundle exec rspec spec/rails_spec.rb spec/rails_integration_spec.rb
+
   build:
     runs-on: ${{ matrix.os }}
     name: Ruby ${{ matrix.ruby }} on ${{ matrix.os }}
@@ -47,13 +105,12 @@ jobs:
         run: gem build ripr.gemspec
       - name: Exercise the composite action and annotations
         if: matrix.ruby == '4.0' && matrix.os == 'ubuntu-latest'
-        uses: ./
+        uses: ./ # zizmor: ignore[self-repository] actionlint 1.7.12 does not parse $/ references.
         with:
           path: test/fixtures/projects/minitest_basic
           since: ''
       - name: Apply ripr to its Core
         if: matrix.ruby == '4.0' && matrix.os == 'ubuntu-latest'
-        continue-on-error: true
         run: |
           mkdir -p .ripr
           bundle exec ruby script/self_mutate.rb --check

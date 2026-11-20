@@ -15,6 +15,7 @@
   <a href="#installation">Installation</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#reading-the-results">Results</a> ·
+  <a href="#rails">Rails</a> ·
   <a href="#configuration">Configuration</a> ·
   <a href="#ci">CI</a>
 </p>
@@ -27,7 +28,7 @@ ripr requires CRuby 3.3 or later on Linux or macOS and a Minitest or RSpec suite
 gem "ripr", "~> 0.1", group: :test, require: false
 ```
 
-To install from GitHub, use `gem "ripr", git: "https://github.com/ydah/ripr.git", group: :test, require: false`.
+To use features listed under [Unreleased](CHANGELOG.md#unreleased), install from GitHub with `gem "ripr", git: "https://github.com/ydah/ripr.git", group: :test, require: false`.
 
 ## Quick start
 
@@ -45,6 +46,16 @@ bundle exec ripr --since origin/main
 ```
 
 `--since` selects mutations on lines changed since the merge base, including staged, unstaged, and untracked source changes. Use `--scope method` to include every mutation in a touched method. The score and quality gates apply to the selected mutations.
+
+Add `--include-tests-diff` to select mutations reached by tests in changed files. ripr also checks saved reach data for those files when available. A removed test file or changed test helper can select the entire target.
+
+## Rails
+
+Run `bundle exec ripr --rails --since origin/main` from the application root. With no custom `include` setting, ripr selects Ruby files under `app/` and `lib/`. It sets the test environment, boots the application with instrumentation active, and gives each worker a clean copy of the test database. It runs with Spring disabled so the process loads the instrumented code. Keep any bootsnap setup in `config/boot.rb`.
+
+Use `--boot FILE` for a different environment file. ripr also recognizes a conventional Rails application when you pass `--boot` alone. In other Ruby projects, `--boot` runs custom setup before loading tests.
+
+Start with the test database prepared. SQLite uses file copies. PostgreSQL and MySQL require their dump and restore clients on `PATH` and test credentials that can create and drop isolated databases on the test server. Name server-backed test databases with a `test` component, such as `myapp_test`.
 
 ## Reading the results
 
@@ -67,6 +78,8 @@ Add age 18 to exercise the boundary.
 
 When ripr cannot safely compare values during the baseline, it keeps the affected tests in the mutation run. Use `--verify-not-infected` to run the relevant tests against mutations classified as `not_infected`.
 
+Use `--verify-killed` to replay the selected tests on the original code in a fresh worker. A failed replay is classified as an execution error.
+
 ### Reports
 
 The default report is text. Write an HTML report and its `mutation.json` data to `.ripr/report/` with `bundle exec ripr --reporter html`. The interactive viewer requires network access, and the static table works offline.
@@ -74,6 +87,8 @@ The default report is text. Write an HTML report and its `mutation.json` data to
 For tools and coding agents, use `bundle exec ripr --since origin/main --reporter agent` to emit [JSON with a suggested action for each gap](schema/agent-v1.json). Keep `agent` as the only stdout reporter when piping JSON. Use `bundle exec ripr --only MUTANT_ID` to rerun a single mutation.
 
 Install the [bundled agent skill](skills/mutation-test-loop/SKILL.md) with `bundle exec ripr init-skill`. The default destination is `.claude/skills/mutation-test-loop`. Use `--dir` to choose another directory.
+
+To connect an MCP client, start `bundle exec ripr mcp` over stdio with the target project as its working directory. The `ripr_run` tool accepts an optional Git base, and `ripr_recheck` reruns a mutation by short ID.
 
 ### Equivalent mutations
 
@@ -98,6 +113,11 @@ jobs: auto
 ```
 
 Use `bundle exec ripr --help` for CLI options and `bundle exec ripr list operators` for available mutations. CLI flags override file settings. Ignore `.ripr/` in Git. Use `--full` to bypass cached results, especially after changing external test data or environment variables.
+
+- `--operators full` adds string, regexp, collection, safe-navigation, compound assignment, and `case` mutations. `--full` controls the execution scope.
+- `--static` includes supported load-time mutations. ripr starts a fresh process with each mutation already active. A failure while loading the application is an execution error.
+- `--call-graph-reuse` can retain results across method-body edits if the current baseline observations and the previously executed dependencies still match. It reruns the baseline after a source change and falls back to ordinary invalidation when dependency tracking is incomplete.
+- `--typecheck sorbet` or `--typecheck rbs` checks mutations in a temporary copy using `srb tc` or `steep check`. Install the selected checker in the project bundle and make sure the original project passes its check.
 
 ## CI
 
@@ -129,11 +149,11 @@ Timeouts count as detected mutations. Errors remain in the score denominator. Ac
 
 ## Scope and limitations
 
-ripr targets pure Ruby libraries. Start it before loading the source under test. It uses `fork` and CRuby's instruction-sequence loader. Use `RIPR_LOADER=require` for the alternate loader, which rejects wrapped target `load` calls. Configure bootsnap before ripr installs its hook.
+ripr uses `fork` and CRuby's instruction-sequence loader. Start it before loading the source under test. Use `RIPR_LOADER=require` for the alternate loader, which rejects wrapped target `load` calls.
 
-Mutation sites are inside ordinary method definitions. Class-body and top-level expressions, `define_method` blocks, singleton receivers other than `self`, and detached heredoc interpolation are excluded. Operands of `defined?` stay intact. ripr instruments source in memory.
+By default, mutation sites are inside ordinary method definitions. `define_method` blocks, singleton receivers other than `self`, and detached heredoc interpolation are excluded. Operands of `defined?` stay intact. ripr instruments source in memory.
 
-Use deterministic, independent tests. Shared state, time, and thread ordering can invalidate cached observations. If a mutation site runs outside a tracked test, ripr conservatively selects all tests. Mutations cannot change effects already computed while loading. Ractor and complete Rails integration are outside the supported scope.
+Use deterministic, independent tests. Shared state, time, and thread ordering can invalidate cached observations. If a mutation site runs outside a tracked test, ripr conservatively selects all tests. Use `--static` when the mutation must affect a value computed during loading. Ractor is outside the supported scope.
 
 ## Development
 
