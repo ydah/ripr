@@ -87,9 +87,11 @@ RSpec.describe Ripr::Core::CallGraph do
     expect(dependencies).to be_nil
   end
 
-  it "refuses a file encoding change that can inspect a byte order mark" do
+  it "refuses a byte order mark check from user code labeled with line zero" do
     File.open(__FILE__, "rb") do |file|
-      _, dependencies = graph(source).trace { file.set_encoding("bom|utf-8") }
+      code = '->(stream) { stream.set_encoding("bom|utf-8") }'
+      check_encoding = RubyVM::InstructionSequence.compile(code, file.path, file.path, 0).eval
+      _, dependencies = graph(source).trace { check_encoding.call(file) }
       expect(dependencies).to be_nil
     end
   end
