@@ -1,0 +1,89 @@
+name: Release gem
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ['3.3', '3.4', '4.0']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        with:
+          ruby-version: ${{ matrix.ruby }}
+      - name: Verify the release tag and notes
+        run: ruby script/release_notes.rb "$GITHUB_REF_NAME" > /dev/null
+      - run: bundle install
+      - run: bundle exec rake test
+      - run: bundle exec rubocop --cache false
+        if: matrix.ruby == '4.0'
+      - run: gem build ripr.gemspec
+        if: matrix.ruby == '4.0'
+
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        with:
+          ruby-version: '4.0'
+      - run: bundle install
+      - uses: rubygems/release-gem@5c53f5308233b7c0f47411f0471b3faae6fa57b2 # v1.4.2
+        with:
+          await-release: false
+
+  github-release:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Confirm the gem is public on RubyGems
+        run: >-
+          curl --fail --silent --show-error --retry 8 --retry-all-errors
+          --retry-delay 5 --retry-max-time 90 --connect-timeout 5 --max-time 15
+          --output /dev/null
+          "https://rubygems.org/api/v2/rubygems/ripr/versions/${GITHUB_REF_NAME#v}.json"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        with:
+          ruby-version: '4.0'
+      - name: Publish GitHub Release from the changelog
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="$RUNNER_TEMP/ripr-release-notes.md"
+          ruby script/release_notes.rb "$GITHUB_REF_NAME" > "$notes"
+          prerelease=false
+          if [[ ${GITHUB_REF_NAME#v} =~ [[:alpha:]] ]]; then
+            prerelease=true
+          fi
+          if draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [[ "$draft" == true ]]; then
+              gh release edit "$GITHUB_REF_NAME" --verify-tag --draft=false --prerelease="$prerelease" --notes-file "$notes"
+            fi
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+              --prerelease="$prerelease" --notes-file "$notes"
+          fi
