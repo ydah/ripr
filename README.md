@@ -25,10 +25,8 @@
 ripr requires CRuby 3.3 or later on Linux or macOS and a Minitest or RSpec suite. Add ripr to your project's Gemfile.
 
 ```ruby
-gem "ripr", "~> 0.1", group: :test, require: false
+gem "ripr", "~> 0.2", group: :test, require: false
 ```
-
-To use features listed under [Unreleased](CHANGELOG.md#unreleased), install from GitHub with `gem "ripr", git: "https://github.com/ydah/ripr.git", group: :test, require: false`.
 
 ## Quick start
 
