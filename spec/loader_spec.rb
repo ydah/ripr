@@ -111,6 +111,69 @@ RSpec.describe "instrumented loading" do
     expect(result).to eq([true, false, true])
   end
 
+  it "keeps the loader uninstalled when a late prepend finishes during teardown" do
+    result = isolated_loader(<<~'RUBY')
+      path = File.join(dir, "target.rb")
+      File.write(path, "$value = :original\n")
+      loader = Ripr::Loader.new(path => "$value = :instrumented\n").install
+      entered = Queue.new
+      resume = Queue.new
+      late_hook = Module.new do
+        def load_iseq(_path) = nil
+      end
+      late_hook.define_singleton_method(:prepended) do |_target|
+        entered << true
+        resume.pop
+      end
+
+      pending = Thread.new { RubyVM::InstructionSequence.singleton_class.prepend(late_hook) }
+      entered.pop
+      loader.uninstall
+      resume << true
+      pending.value
+      load(path)
+      puts JSON.generate($value)
+    RUBY
+    expect(result).to eq("original")
+  end
+
+  %w[prepend_features prepended].each do |callback|
+    it "preserves the current loader order when loaders change during #{callback}" do
+      result = isolated_loader(<<~RUBY)
+        path = File.join(dir, "target.rb")
+        File.write(path, "$value = :original\\n")
+        first = Ripr::Loader.new(path => "$value = :first\\n").install
+        entered = Queue.new
+        resume = Queue.new
+        late_hook = Module.new do
+          def load_iseq(_path) = nil
+        end
+        late_hook.define_singleton_method(:#{callback}) do |target|
+          entered << true
+          resume.pop
+          super(target)
+        end
+
+        pending = Thread.new { RubyVM::InstructionSequence.singleton_class.prepend(late_hook) }
+        entered.pop
+        #{'first.uninstall.install' if callback == 'prepend_features'}
+        second = Ripr::Loader.new(path => "$value = :second\\n").install
+        resume << true
+        pending.value
+
+        loaded = [second, first].map do |loader|
+          load(path)
+          value = $value
+          loader.uninstall
+          value
+        end
+        load(path)
+        puts JSON.generate([*loaded, $value])
+      RUBY
+      expect(result).to eq(%w[second first original])
+    end
+  end
+
   it "retains the earlier active loader registration when a nested loader is removed" do
     result = isolated_loader(<<~'RUBY')
       path = File.join(dir, "target.rb")

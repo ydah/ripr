@@ -135,10 +135,10 @@ RSpec.describe "incremental mutation results" do
     expect(Ripr::Core::ReusePlanner.reusable?(nil, mutant, **options)).to be(false)
   end
 
-  it "discards snapshots recorded before indirect operator callbacks were checked" do
+  it "discards snapshots recorded before late loader hooks were supported" do
     Dir.mktmpdir("ripr-old-snapshot") do |directory|
       path = File.join(directory, "snapshot.json")
-      File.write(path, JSON.generate("version" => 1, "mutants" => { mutant.fetch("full_id") => mutant }))
+      File.write(path, JSON.generate("version" => 2, "mutants" => { mutant.fetch("full_id") => mutant }))
       expect { expect(Ripr::Snapshot.new(path).read).to eq({}) }.to output(/unsupported snapshot/).to_stderr
     end
   end

@@ -34,6 +34,32 @@ RSpec.describe "ripr command" do
     expect(boundary.fetch("kind")).to eq("not_infected")
   end
 
+  it "observes mutations through load_iseq when test setup starts Bootsnap with a warm compile cache" do
+    Dir.mktmpdir("ripr-bootsnap") do |directory|
+      FileUtils.cp_r(File.join(fixture, "."), directory)
+      File.write(File.join(directory, "test/boot_helper.rb"), "nil\n")
+      boot = "require 'bootsnap/setup'\n"
+      setup = boot + <<~RUBY
+        Bootsnap.instrumentation = ->(event, path) do
+          File.write("bootsnap-hit", path) if event == :hit && path.end_with?("/boot_helper.rb")
+        end
+        require_relative "boot_helper"
+      RUBY
+      test = File.join(directory, "test/sample_test.rb")
+      File.write(test, setup + File.read(test).sub("adult?(20)", "adult?(18)"))
+      env = { "RIPR_LOADER" => nil, "BOOTSNAP_CACHE_DIR" => File.join(directory, "cache"), "DISABLE_BOOTSNAP" => nil,
+              "DISABLE_BOOTSNAP_COMPILE_CACHE" => nil, "BOOTSNAP_READONLY" => nil }
+      warm = "#{boot}require './lib/sample'\nrequire './test/boot_helper'"
+      _, error, warmup = Open3.capture3(env, RbConfig.ruby, "-e", warm, chdir: directory)
+      expect(warmup.success?).to be(true), error
+
+      stdout, error, status = command("--full", "--operators", "comparison", "--reporter", "agent", directory: directory, env: env)
+      expect(status.success?).to be(true), error
+      expect(JSON.parse(stdout).fetch("summary")).to include("killed" => 1, "not_reached" => 0)
+      expect(File.read(File.join(directory, "bootsnap-hit"))).to end_with("/test/boot_helper.rb")
+    end
+  end
+
   it "matches the design's complete golden classifications for both frameworks" do
     expected = JSON.parse(File.read(File.expand_path("../test/fixtures/golden/basic.json", __dir__)))
     %w[minitest rspec].each do |framework|
