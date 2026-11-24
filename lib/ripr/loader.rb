@@ -44,6 +44,7 @@ module Ripr
         end
       end
       @hooks.clear
+      @iseq_hook = nil
       @compiled.clear
       Loader.active_loaders.delete(self)
       self
@@ -113,6 +114,24 @@ module Ripr
 
     def install_iseq_hook
       loader = self
+      target = RubyVM::InstructionSequence.singleton_class
+      prepend_iseq_hook(target)
+
+      # Bootsnap can prepend its compiler while the application or tests are booting.
+      hook = Module.new do
+        define_method(:prepend) do |*modules|
+          owner = instance_method(:load_iseq).owner
+          super(*modules).tap do
+            loader.send(:prepend_iseq_hook, self) if instance_method(:load_iseq).owner != owner
+          end
+        end
+      end
+      target.singleton_class.prepend(hook)
+      @hooks << hook
+    end
+
+    def prepend_iseq_hook(target)
+      loader = self
       hook = Module.new do
         define_method(:load_iseq) do |path|
           code = loader.code_for(path)
@@ -123,7 +142,10 @@ module Ripr
           end
         end
       end
-      RubyVM::InstructionSequence.singleton_class.prepend(hook)
+      Module.instance_method(:prepend).bind_call(target, hook) # Bypass the observer for ripr's own hooks.
+      @iseq_hook&.remove_method(:load_iseq)
+      @hooks.delete(@iseq_hook)
+      @iseq_hook = hook
       @hooks << hook
     end
 

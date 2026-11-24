@@ -6,7 +6,7 @@ require "tempfile"
 
 module Ripr
   class Snapshot
-    VERSION = 2
+    VERSION = 3
 
     def initialize(path = ".ripr/snapshot.json")
       @path = File.expand_path(path)
