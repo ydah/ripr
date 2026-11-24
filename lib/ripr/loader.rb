@@ -4,6 +4,9 @@ require "monitor"
 
 module Ripr
   class Loader
+    HOOK_LOCK = Mutex.new
+    private_constant :HOOK_LOCK
+
     @active_loaders = []
 
     class << self
@@ -25,28 +28,32 @@ module Ripr
     end
 
     def install
-      return self unless @hooks.empty?
+      HOOK_LOCK.synchronize do
+        return self unless @hooks.empty?
 
-      if ENV["RIPR_LOADER"] == "require"
-        install_require_hook(Kernel, private_methods: true)
-        install_require_hook(Kernel.singleton_class, private_methods: false)
-      else
-        install_iseq_hook
+        if ENV["RIPR_LOADER"] == "require"
+          install_require_hook(Kernel, private_methods: true)
+          install_require_hook(Kernel.singleton_class, private_methods: false)
+        else
+          install_iseq_hook
+        end
+        Loader.active_loaders << self
       end
-      Loader.active_loaders << self
       self
     end
 
     def uninstall
-      @hooks.each do |hook|
-        (hook.instance_methods(false) + hook.private_instance_methods(false)).each do |name|
-          hook.send(:remove_method, name)
+      HOOK_LOCK.synchronize do
+        @hooks.each do |hook|
+          (hook.instance_methods(false) + hook.private_instance_methods(false)).each do |name|
+            hook.send(:remove_method, name)
+          end
         end
+        @hooks.clear
+        @iseq_hook = nil
+        @compiled.clear
+        Loader.active_loaders.delete(self)
       end
-      @hooks.clear
-      @iseq_hook = nil
-      @compiled.clear
-      Loader.active_loaders.delete(self)
       self
     end
 
@@ -110,6 +117,8 @@ module Ripr
       compile(path).eval
     end
 
+    protected attr_reader :iseq_hook
+
     private
 
     def install_iseq_hook
@@ -120,14 +129,30 @@ module Ripr
       # Bootsnap can prepend its compiler while the application or tests are booting.
       hook = Module.new do
         define_method(:prepend) do |*modules|
-          owner = instance_method(:load_iseq).owner
-          super(*modules).tap do
-            loader.send(:prepend_iseq_hook, self) if instance_method(:load_iseq).owner != owner
-          end
+          # A prepended callback may wait for teardown on another thread.
+          super(*modules).tap { loader.send(:restore_iseq_hooks, self) }
         end
       end
       target.singleton_class.prepend(hook)
       @hooks << hook
+    end
+
+    def restore_iseq_hooks(target)
+      HOOK_LOCK.synchronize do
+        loaders = Loader.active_loaders.reject { |loader| loader.iseq_hook.nil? }
+        return if loaders.empty?
+
+        current = target.instance_method(:load_iseq)
+        in_order = loaders.reverse_each.all? do |loader|
+          next false unless current&.owner == loader.iseq_hook
+
+          current = current.super_method
+          true
+        end
+        return if in_order
+
+        loaders.each { |loader| loader.send(:prepend_iseq_hook, target) }
+      end
     end
 
     def prepend_iseq_hook(target)
