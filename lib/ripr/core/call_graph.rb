@@ -132,6 +132,14 @@ module Ripr
         return true if owner == RubyVM::InstructionSequence.singleton_class && name == :of
         return true if owner == RubyVM::AbstractSyntaxTree.singleton_class && %i[of parse_file].include?(name)
         return true if owner == Prism.singleton_class && name.to_s.end_with?("_file")
+
+        # Ruby 3.3 reports line 0 for the native loader's encoding changes before entering the source file.
+        if name == :set_encoding && owner == IO && event.event == :c_call && event.lineno.zero?
+          frame = caller_locations(2, 1).first
+          return false if %w[require require_relative load].include?(frame&.base_label) && frame.path != event.path &&
+                          event.self.instance_of?(File) && event.self.path == event.path
+        end
+
         return false if SAFE_IO_CALLS.include?(name)
         return false if name == :read && rspec_options && event.path == rspec_options
 
