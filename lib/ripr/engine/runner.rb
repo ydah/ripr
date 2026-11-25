@@ -45,7 +45,7 @@ module Ripr
         @profile = Profile.new
       end
 
-      def plan
+      def plan(skipped: nil)
         return @mutants if @planned
 
         started = @profile&.now
@@ -60,7 +60,8 @@ module Ripr
         files.reject! { |path| @config[:exclude].any? { |pattern| File.fnmatch?(pattern, path, File::FNM_PATHNAME) } }
         files.each do |path|
           analysis = Core::Analyzer.call(
-            File.binread(path), path, operators: @config[:operators], arid_callees: @config[:arid_callees], static: @config[:static]
+            File.binread(path), path,
+            operators: @config[:operators], arid_callees: @config[:arid_callees], static: @config[:static], skipped: skipped
           )
           source = @sources[path] = analysis.fetch(:source)
           instrument_started = @profile&.now
@@ -70,8 +71,11 @@ module Ripr
           @table.merge!(instrumented.fetch(:site_table))
           unsupported = instrumented.fetch(:invalid)
           planned = analysis.fetch(:mutants).map do |mutant|
-            invalid = unsupported.include?(mutant.fetch(:id)) || mutant[:invalid]
-            Mutant.from_analysis(mutant, invalid: invalid)
+            reason = if mutant[:invalid] then "replacement is invalid Ruby"
+                     elsif unsupported.include?(mutant.fetch(:id)) then "unsupported instrumentation"
+                     end
+            mutant = mutant.merge(invalid_reason: reason) if reason
+            Mutant.from_analysis(mutant, invalid: reason ? true : nil)
           end
           @mutants.concat(planned)
           @warnings.concat(analysis.fetch(:warnings) + instrumented.fetch(:warnings))
@@ -90,6 +94,7 @@ module Ripr
           end
         end
         @mutants.freeze
+        collect_skipped_mutants(skipped) if skipped
         @planned = true
         @profile&.phase("plan", started)
         @mutants
@@ -114,6 +119,16 @@ module Ripr
       end
 
       private
+
+      def collect_skipped_mutants(skipped)
+        @mutants.each do |mutant|
+          reason = mutant.accepted ? "accepted: #{mutant.accepted}" : mutant.invalid_reason
+          next unless reason
+
+          location = mutant.location
+          skipped << [location.file, location.line, location.column, reason]
+        end
+      end
 
       def select_mutants
         started = @profile&.now

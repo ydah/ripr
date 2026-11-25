@@ -26,6 +26,7 @@ module Ripr
       @list_kind = @arguments.shift if command == "list" && %w[mutants operators].include?(@arguments.first)
       parser.parse!(@arguments)
       return 0 if @help
+      raise ArgumentError, "--skipped requires ripr list mutants" if @list_skipped && (command != "list" || @list_kind == "operators")
       return mcp if command == "mcp"
 
       directory = @arguments.length == 1 && File.directory?(@arguments.first) &&
@@ -73,6 +74,7 @@ module Ripr
           options.on("--#{name}") { @overrides[name.tr("-", "_").to_sym] = true }
         end
         options.on("--reason TEXT") { |v| @reason = v }
+        options.on("--skipped", "List excluded mutation sites with reasons") { @list_skipped = true }
         options.on("--dir DIR") { |v| @skill_dir = v }
         options.on("--force") { @force = true }
         options.on("--version") do
@@ -108,6 +110,8 @@ module Ripr
       raise ArgumentError, "#{command} is not available yet" unless %w[run list].include?(command)
 
       runner = Engine::Runner.new(config, @arguments)
+      return list_skipped(runner) if @list_skipped
+
       runner.plan
       results = if command == "list"
                   runner.mutants.map { |mutant| mutant.to_record.merge("status" => "planned") }
@@ -125,6 +129,15 @@ module Ripr
       return 2 if config[:fail_on_survived] && summary.fetch("survived").positive?
       return 2 if config[:thresholds]["break"] && summary.fetch("score") < config[:thresholds].fetch("break")
 
+      0
+    end
+
+    def list_skipped(runner)
+      skipped = []
+      runner.plan(skipped: skipped)
+      skipped.uniq.sort.each do |path, line, column, reason|
+        @stdout.puts "#{path}:#{line}:#{column} #{reason.gsub(/[\r\n]+/, ' ')}"
+      end
       0
     end
 

@@ -59,6 +59,34 @@ if ENV["RIPR_TEST_RAILS"]
       expect(created_test_database).to be(false)
     end
 
+    it "switches a Rails scope's lambda body without static mutations" do
+      status, mutants = run_fixture(<<~RUBY)
+        require "ripr/cli"
+        require "stringio"
+
+        model = "app/models/widget.rb"
+        File.write(model, File.read(model).sub("  MINIMUM_STOCK = 1", <<~SCOPE))
+          MINIMUM_STOCK = 1
+          minimum = 10
+          scope :enough_stock, ->(extra: 2) { where(stock: minimum + extra) }
+        SCOPE
+        test = "test/widget_test.rb"
+        File.write(test, File.read(test).sub("  def test_stocked", <<~TEST))
+          def test_stocked
+            assert_equal ["booted"], Widget.enough_stock.pluck(:label)
+        TEST
+        output = StringIO.new
+        code = Ripr::CLI.start(%w[--rails --jobs 1 --operators arithmetic --reporter agent], stdout: output)
+        snapshot = JSON.parse(File.read(".ripr/snapshot.json"))
+        puts JSON.generate([code, snapshot.fetch("mutants").values])
+      RUBY
+
+      expect(status).to eq(0)
+      expect(mutants).to contain_exactly(
+        include("subject" => "Widget#<lambda>", "status" => "killed", "load_reached" => false, "killed_by" => "WidgetTest#test_stocked")
+      )
+    end
+
     it "copies captured SQLite snapshots without acquiring a database lock" do
       counts = run_fixture(<<~RUBY)
         require "ripr/integration/rails_database"
