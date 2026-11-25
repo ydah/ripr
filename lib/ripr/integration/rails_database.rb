@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "fileutils"
 require "open3"
 require "securerandom"
 
@@ -101,7 +102,10 @@ module Ripr
           end
         end
 
-        alias restore dump
+        def restore(input, output)
+          # The backup connection closes before these private snapshots are shared with workers.
+          FileUtils.cp(input, output)
+        end
 
         def remove(database)
           FileUtils.rm_f([database, "#{database}-wal", "#{database}-shm", "#{database}-journal"])

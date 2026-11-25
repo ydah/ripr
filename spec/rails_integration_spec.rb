@@ -59,6 +59,39 @@ if ENV["RIPR_TEST_RAILS"]
       expect(created_test_database).to be(false)
     end
 
+    it "copies captured SQLite snapshots without acquiring a database lock" do
+      counts = run_fixture(<<~RUBY)
+        require "ripr/integration/rails_database"
+        require "sqlite3"
+        require "fileutils"
+        require "json"
+
+        FileUtils.mkdir_p("isolated")
+        SQLite3::Database.new("test.sqlite3") do |original|
+          original.execute("PRAGMA journal_mode = WAL")
+          original.execute("PRAGMA wal_autocheckpoint = 0")
+          original.execute("CREATE TABLE widgets (id INTEGER)")
+          original.execute("INSERT INTO widgets VALUES (1)")
+          database = Ripr::Integration::RailsDatabase::SQLite.new({ database: "test.sqlite3" }, Dir.pwd, "isolated", 0)
+          SQLite3::Database.new(database.parent) { |parent| parent.execute("INSERT INTO widgets VALUES (2)") }
+          database.capture
+
+          counts = []
+          SQLite3::Database.new("isolated/database-0-ready") do |snapshot|
+            snapshot.execute("PRAGMA journal_mode = DELETE")
+            snapshot.execute("BEGIN EXCLUSIVE")
+            worker = database.worker(0, fresh_boot: false)
+            SQLite3::Database.new(worker) { |copy| counts << copy.get_first_value("SELECT count(*) FROM widgets") }
+          end
+          pristine = database.worker(0, fresh_boot: true)
+          SQLite3::Database.new(pristine) { |copy| counts << copy.get_first_value("SELECT count(*) FROM widgets") }
+          puts JSON.generate(counts << original.get_first_value("SELECT count(*) FROM widgets"))
+        end
+      RUBY
+
+      expect(counts).to eq([2, 1, 1])
+    end
+
     %w[sqlite postgresql mysql].each do |adapter|
       url = ENV.fetch("RIPR_TEST_#{adapter.upcase}", nil)
       next unless adapter == "sqlite" || url

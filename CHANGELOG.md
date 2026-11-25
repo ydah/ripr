@@ -7,6 +7,7 @@
 - Prioritize previously killing tests within the test framework's ordering rules.
 - Suggest operands that distinguish a comparison or arithmetic mutation from the original expression.
 - Warm the parent process before forking and cap automatic worker counts by available memory.
+- Avoid SQLite snapshot lock contention between Rails workers.
 
 ## 0.2.0 — 2026-11-24
 
