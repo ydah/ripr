@@ -122,6 +122,7 @@ Use `bundle exec ripr --help` for CLI options and `bundle exec ripr list operato
 - `--operators full` adds string, regexp, collection, safe-navigation, compound assignment, and `case` mutations. `--full` controls the execution scope.
 - `--static` includes supported load-time mutations. ripr starts a fresh process with each mutation already active. A failure while loading the application is an execution error.
 - `--call-graph-reuse` can retain results across method-body edits if the current baseline observations and the previously executed dependencies still match. It reruns the baseline after a source change and falls back to ordinary invalidation when dependency tracking is incomplete.
+- `--boot` and `--rails` reuse cached results when observed startup inputs match. Rails can reuse results with isolated SQLite snapshots or with no database. External boot scripts, untracked startup operations, and server-backed databases require a fresh run.
 - `--typecheck sorbet` or `--typecheck rbs` checks mutations in a temporary copy using `srb tc` or `steep check`. Install the selected checker in the project bundle and make sure the original project passes its check.
 
 ## CI
