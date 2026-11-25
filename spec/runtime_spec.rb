@@ -306,21 +306,46 @@ RSpec.describe "mutation runtime" do
 
   it "snapshots ordinary large integers and declines ones with excessive storage" do
     integer = 2**800
-    huge_integer = 2**16_384
+    largest_integer = 2**8_191
 
     expect(Ripr::Value.same?([integer], [Integer(integer.to_s)])).to be(true)
     expect(Ripr::Value.same?([integer], [integer + 1])).to be(false)
-    expect(Ripr::Value.snapshot([huge_integer])).to be_nil
+    expect(Ripr::Value.snapshot([largest_integer])).not_to be_nil
+    expect(Ripr::Value.snapshot([largest_integer * 2])).to be_nil
   end
 
-  it "declines very wide arrays, hashes, and Data records" do
-    pairs = (1..48).to_h { |index| [index, index] }
-    record = Data.define(*(1..48).map { |index| :"column_#{index}" })
+  it "snapshots up to 32 entries in arrays, hashes, and Data records" do
+    [[32, false], [33, true]].each do |size, unknown|
+      pairs = (1..size).to_h { |index| [index, index] }
+      record = Data.define(*(1..size).map { |index| :"column_#{index}" })
 
-    expect(Ripr::Value.snapshot(pairs.keys)).to be_nil
-    expect(Ripr::Value.snapshot(pairs)).to be_nil
-    expect(Ripr::Value.snapshot(record.new(*pairs.values))).to be_nil
-    expect(Ripr::Value.snapshot(pairs.select { |key, _| key <= 12 })).not_to be_nil
+      [pairs.keys, pairs, record.new(*pairs.values)].each do |value|
+        expect(Ripr::Value.snapshot(value).nil?).to eq(unknown)
+      end
+    end
+  end
+
+  it "snapshots up to four nested collection levels" do
+    value = [[[[1]]]]
+
+    expect(Ripr::Value.snapshot(value)).not_to be_nil
+    expect(Ripr::Value.snapshot([value])).to be_nil
+  end
+
+  it "snapshots up to 128 values across nested collections" do
+    value = Array.new(3) { Array.new(32, 1) } << Array.new(27, 1)
+
+    expect(Ripr::Value.snapshot(value)).not_to be_nil
+    value.last << 1
+    expect(Ripr::Value.snapshot(value)).to be_nil
+  end
+
+  it "snapshots string payloads of up to 1,024 bytes" do
+    value = "x" * 1_024
+
+    expect(Ripr::Value.snapshot([value])).not_to be_nil
+    value << "x"
+    expect(Ripr::Value.snapshot([value])).to be_nil
   end
 
   it "does not compare Hash keys whose insertion-time hash can differ from their current value" do
