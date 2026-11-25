@@ -6,12 +6,12 @@ require_relative "method_exits"
 module Ripr
   module Engine
     class Scheduler
-      def initialize(config, baseline, table, cache, planned:, warnings:, metrics:, rails: nil, static_run: nil, profile: nil)
+      def initialize(config, baseline, table, cache, targets:, warnings:, metrics:, rails: nil, static_run: nil, profile: nil)
         @config = config
         @baseline = baseline
         @table = table
         @cache = cache
-        @planned = planned
+        @targets = targets
         @warnings = warnings
         @metrics = metrics
         @rails = rails
@@ -156,7 +156,7 @@ module Ripr
         end
         return {} if survivors.empty?
 
-        targets = MethodExits.targets(@planned).slice(*survivors.map { |mutant| mutant.fetch("subject") }.uniq)
+        targets = @targets.call.slice(*survivors.map { |mutant| mutant.fetch("subject") }.uniq)
         jobs = survivors.select { |mutant| targets.key?(mutant.fetch("subject")) }
         originals = stable_exits(jobs, targets, adapter)
         trials = jobs.filter_map do |mutant|

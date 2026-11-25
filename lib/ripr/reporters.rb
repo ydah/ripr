@@ -1,17 +1,19 @@
 # frozen_string_literal: true
 
 require "json"
-require "cgi"
 require "fileutils"
 require "pathname"
 require "shellwords"
 require_relative "core/classifier"
 require_relative "core/input_suggestions"
 require_relative "core/operators"
+require_relative "reporters/html"
+require_relative "reporters/triage"
 
 module Ripr
   module Reporters
-    ACTIONS = { "not_reached" => "add_test", "not_infected" => "add_input", "not_detected" => "strengthen_assertion" }.freeze
+    ACTIONS = { "not_reached" => "add_test", "not_infected" => "add_input", "not_propagated" => "add_input",
+                "not_revealed" => "strengthen_assertion", "not_detected" => "strengthen_assertion" }.freeze
     HINTS = {
       "not_reached" => "Add a test that executes this method and branch.",
       "not_infected" => "Add boundary inputs that change the mutated expression's value.",
@@ -27,11 +29,11 @@ module Ripr
                      "not_revealed" => "Survived", "accepted" => "Ignored",
                      "static" => "Ignored", "invalid" => "CompileError", "planned" => "Pending" }.freeze
 
-    def self.agent(results, run, summary = Core::Classifier.summary(results), config: nil)
-      gaps = results.filter_map do |mutant|
+    def self.agent(results, run, summary = Core::Classifier.summary(results), config: nil, triage: nil)
+      gaps = (triage ? triage.gaps : results).filter_map do |mutant|
         status = mutant.fetch("status")
         diagnosed = Core::Classifier::PROPAGATION.include?(status)
-        kind = diagnosed ? "not_detected" : status
+        kind = diagnosed && !triage ? "not_detected" : status
         next unless ACTIONS.key?(kind)
 
         id = mutant.fetch("id")
@@ -49,13 +51,24 @@ module Ripr
         flags += " --operators #{operator}" if Core::Operators::EXTRA_NAMES.include?(operator)
         gap = mutant.slice("id", "full_id", "location", "subject", "operator", "original", "mutated", "observed", "covering_tests",
                            "load_reached")
-                    .merge("kind" => kind, "action" => ACTIONS.fetch(kind), "hint" => hint,
+                    .merge("action" => ACTIONS.fetch(kind), "hint" => hint,
                            "rerun" => "ripr --only #{id}#{flags}", "accept" => "ripr accept #{id}#{flags} --reason \"...\"")
-        gap["stage"] = status if diagnosed
+        if triage
+          gap["stage"] = status
+          gap["priority"] = triage.priorities.fetch(mutant.fetch("full_id"))
+        else
+          gap["kind"] = kind
+          gap["stage"] = status if diagnosed
+        end
         gap["propagation"] = mutant.fetch("propagation") if mutant.key?("propagation")
         gap["suggested_inputs"] = suggestion.fetch(:inputs) if suggestion
         gap
       end
+      if triage
+        return { "schema" => "ripr.agent/v2", "run" => run, "summary" => summary, "gaps" => gaps,
+                 "methods" => triage.method_cards, "weak_tests" => triage.weak_tests }
+      end
+
       diagnosed = Core::Classifier::PROPAGATION.sum { |status| summary.fetch(status, 0) }
       legacy = summary.except(*Core::Classifier::PROPAGATION).merge("not_detected" => summary.fetch("not_detected") + diagnosed)
       { "schema" => "ripr.agent/v1", "run" => run, "summary" => legacy, "gaps" => gaps }
@@ -84,29 +97,18 @@ module Ripr
       summary = Core::Classifier.summary(results)
       summary["static"] += runner.static
       run = { "since" => config[:since], "scope" => config[:scope], "framework" => runner.framework, "metrics" => runner.metrics }
-      config[:reporters].each do |name|
+      reporters = config[:reporters]
+      if reporters.include?("agent-v2") || (reporters.include?("text") && !config[:dry_run])
+        triage = Triage.build(results, changed: runner.changed_source_lines, public_subjects: runner.public_subjects)
+      end
+      reporters.each do |name|
         case name
         when "text"
-          stdout.puts "Killed #{summary['killed']} · Survived #{summary['survived']} " \
-                      "(#{summary['not_infected']} not infected) · Score #{summary['score']}%"
-          stdout.puts "Reused #{runner.metrics['reused']} · Baseline #{runner.metrics['baseline_tests_run']} tests · " \
-                      "#{summary['static']} static variants excluded"
-          results.each do |mutant|
-            next unless HINTS.key?(mutant["status"]) || config[:dry_run]
-
-            location = mutant.fetch("location")
-            stdout.puts "#{mutant['status'].tr('_', ' ')} #{location['file']}:#{location['line']}:#{location['column']} " \
-                        "#{mutant['original'].inspect} → #{mutant['mutated'].inspect} id=#{mutant['id']}"
-            stdout.puts "  observed: #{JSON.generate(mutant['observed'])}" unless mutant.fetch("observed", []).empty?
-            stdout.puts "  #{propagation_message(mutant)}" if mutant["propagation"]
-            if (suggestion = Core::InputSuggestions.for(mutant))
-              stdout.puts "  suggested inputs: #{JSON.generate(suggestion.fetch(:inputs))}"
-              stdout.puts "  #{suggestion[:reason]}" if suggestion[:reason]
-            end
-            stdout.puts "  #{load_note(mutant)}" if mutant["load_reached"]
-          end
+          write_text(stdout, results, summary, runner.metrics, triage, dry_run: config[:dry_run])
         when "agent"
           stdout.puts JSON.generate(agent(results, run, summary, config: config))
+        when "agent-v2"
+          stdout.puts JSON.generate(agent(results, run, summary, config: config, triage: triage))
         when "github"
           results.each do |mutant|
             next unless HINTS.key?(mutant["status"])
@@ -126,11 +128,48 @@ module Ripr
         when "json", "html"
           FileUtils.mkdir_p(config[:report_dir])
           report = mte(results, runner.sources, config[:thresholds])
-          File.write(File.join(config[:report_dir], "mutation.json"), "#{JSON.pretty_generate(report)}\n")
-          File.write(File.join(config[:report_dir], "index.html"), html(report)) if name == "html"
+          File.write(File.join(config[:report_dir], "mutation.json"), "#{JSON.pretty_generate(report)}\n", encoding: "UTF-8")
+          if name == "html"
+            stages = results.to_h { |mutant| mutant.values_at("id", "status") }
+            HTML.write(report, config[:report_dir], stages: stages)
+          end
         end
       end
       summary
+    end
+
+    def self.write_text(stdout, results, summary, metrics, triage, dry_run:)
+      stdout.puts "Killed #{summary['killed']} · Survived #{summary['survived']} " \
+                  "(#{summary['not_infected']} not infected) · Score #{summary['score']}%"
+      stdout.puts "Reused #{metrics['reused']} · Baseline #{metrics['baseline_tests_run']} tests · " \
+                  "#{summary['static']} static variants excluded"
+      return results.each { |mutant| write_gap(stdout, mutant) } if dry_run
+
+      groups = triage.gaps.group_by { |mutant| [mutant.fetch("location").fetch("file"), mutant.fetch("subject")] }
+      triage.method_cards.each do |method|
+        file, subject = method.values_at("file", "subject")
+        entries = groups.fetch([file, subject])
+        stages = method.fetch("stages").map { |stage, count| "#{count} #{stage.tr('_', ' ')}" }.join(" · ")
+        stdout.puts "#{subject} (#{file}) · #{stages} · Start with #{entries.first.fetch('id')}"
+        entries.each { |mutant| write_gap(stdout, mutant) }
+      end
+      return if triage.weak_tests.empty?
+
+      stdout.puts "Tests that reach mutations without a recorded kill"
+      triage.weak_tests.each { |test| stdout.puts "  #{test.fetch('id')} (#{test.fetch('reached')} reached)" }
+    end
+
+    def self.write_gap(stdout, mutant)
+      location = mutant.fetch("location")
+      stdout.puts "#{mutant['status'].tr('_', ' ')} #{location['file']}:#{location['line']}:#{location['column']} " \
+                  "#{mutant['original'].inspect} → #{mutant['mutated'].inspect} id=#{mutant['id']}"
+      stdout.puts "  observed: #{JSON.generate(mutant['observed'])}" unless mutant.fetch("observed", []).empty?
+      stdout.puts "  #{propagation_message(mutant)}" if mutant["propagation"]
+      if (suggestion = Core::InputSuggestions.for(mutant))
+        stdout.puts "  suggested inputs: #{JSON.generate(suggestion.fetch(:inputs))}"
+        stdout.puts "  #{suggestion[:reason]}" if suggestion[:reason]
+      end
+      stdout.puts "  #{load_note(mutant)}" if mutant["load_reached"]
     end
 
     def self.annotation(value, property: false)
@@ -166,35 +205,10 @@ module Ripr
       end
     end
 
-    private_class_method :suggestion_message, :propagation_message, :describe_exit
+    private_class_method :suggestion_message, :propagation_message, :describe_exit, :write_text, :write_gap
 
     def self.html(report)
-      data = JSON.generate(report).gsub("<") { "\\u003c" }
-      rows = report.fetch("files").flat_map do |path, file|
-        file.fetch("mutants").map do |mutant|
-          values = [path, mutant.fetch("location").fetch("start").fetch("line"), mutant["mutatorName"],
-                    mutant["statusReason"], mutant["replacement"]]
-          "<tr>#{values.map { |v| "<td>#{CGI.escapeHTML(v.to_s)}</td>" }.join}</tr>"
-        end
-      end.join
-      <<~HTML
-        <!doctype html>
-        <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-        <title>ripr mutation report</title>
-        <style>body{font:16px system-ui;margin:2rem;color:#20252b}table{border-collapse:collapse;width:100%}th,td{padding:.6rem;text-align:left;border-bottom:1px solid #ccc}td:last-child{white-space:pre-wrap;font-family:monospace}caption{font-size:1.5rem;text-align:left;margin-bottom:1rem}</style>
-        <mutation-test-report-app id="interactive-report" hidden></mutation-test-report-app>
-        <table id="fallback-report"><caption>ripr mutation report</caption><thead><tr><th>File</th><th>Line</th><th>Operator</th><th>Status</th><th>Replacement</th></tr></thead><tbody>#{rows}</tbody></table>
-        <script type="application/json" id="mutation-report">#{data}</script>
-        <script src="https://cdn.jsdelivr.net/npm/mutation-testing-elements@3.9.0/dist/mutation-test-elements.js" integrity="sha384-/dXYuoYRvO6rJ0FNtdKR+Hmq5iGrkkSDpc/TGgbSoReog26ZqhLhpSt4l+0Wwew2" crossorigin="anonymous" async></script>
-        <script>
-          customElements.whenDefined('mutation-test-report-app').then(() => {
-            const app = document.getElementById('interactive-report');
-            app.report = JSON.parse(document.getElementById('mutation-report').textContent);
-            app.hidden = false;
-            document.getElementById('fallback-report').hidden = true;
-          });
-        </script></html>
-      HTML
+      HTML.render(report)
     end
   end
 end
