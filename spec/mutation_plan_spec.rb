@@ -2,10 +2,11 @@
 
 require "tmpdir"
 require "ripr/config"
-require "ripr/engine/runner"
 
 RSpec.describe "mutation planning" do
   it "keeps mutation definitions immutable and exports the existing record fields" do
+    require "ripr/engine/runner"
+
     Dir.mktmpdir("ripr-mutation-plan") do |directory|
       Dir.chdir(directory) do
         File.write("threshold.rb", "def threshold?(value); value >= 2; end\n")
