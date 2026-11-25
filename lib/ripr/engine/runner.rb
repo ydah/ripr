@@ -237,6 +237,7 @@ module Ripr
       def run_project(selection, &)
         probe_table = @table.slice(*selection.observed.map(&:site).uniq)
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        environment_hash = Snapshot.environment_hash
         observer = @sharding || @reach_selection
         with_project(probe: Probe.new(probe_table, samples: @config[:samples]), observer:) do |adapter|
           boot_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000
@@ -254,7 +255,7 @@ module Ripr
           test_ids = adapter.tests.map { |test| test.fetch("id") }
           @cache = ResultCache.new(@config, sources: @sources, test_files: @test_files, framework: @framework, method_hashes:,
                                             test_ids:, probe_sites: probe_table.keys, graph: @call_graph,
-                                            load_dependencies: @load_dependencies, shared_baseline: !@sharding.nil?)
+                                            load_dependencies: @load_dependencies, shared_baseline: !@sharding.nil?, environment_hash:)
           Process.warmup
           if @sharding
             @shard_boot = @sharding.boot_identity(@framework, @test_files, discovered_tests(adapter), @rails, load_reached)

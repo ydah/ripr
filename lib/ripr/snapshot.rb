@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "digest"
 require "fileutils"
 require "json"
 require "tempfile"
@@ -7,6 +8,10 @@ require "tempfile"
 module Ripr
   class Snapshot
     VERSION = 3
+
+    def self.environment_hash
+      Digest::SHA256.hexdigest(Marshal.dump(ENV.to_a.sort))
+    end
 
     def initialize(path = ".ripr/snapshot.json")
       @path = File.expand_path(path)
