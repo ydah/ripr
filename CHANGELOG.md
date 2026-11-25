@@ -8,6 +8,7 @@
 - Suggest operands that distinguish a comparison or arithmetic mutation from the original expression.
 - Warm the parent process before forking and cap automatic worker counts by available memory.
 - Avoid SQLite snapshot lock contention between Rails workers.
+- Skip equivalent native array additions and subtractions with an empty right operand.
 
 ## 0.2.0 — 2026-11-24
 

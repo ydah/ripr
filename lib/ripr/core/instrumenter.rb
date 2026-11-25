@@ -108,7 +108,8 @@ module Ripr
         (expressions.length - 2).downto(0) do |index|
           expression = "#{kvar} == #{index} ? #{lvar} #{expressions[index]} #{rvar} : (#{expression})"
         end
-        "::Ripr::R.bin(#{site[:key].dump},(#{rendered.fetch(left.node_id)}),#{gap}(#{rewrite(right)}),#{site[:pure]}) " \
+        array_copy = ",true" if expressions.all? { |op| %w[+ -].include?(op) }
+        "::Ripr::R.bin(#{site[:key].dump},(#{rendered.fetch(left.node_id)}),#{gap}(#{rewrite(right)}),#{site[:pure]}#{array_copy}) " \
           "{ |#{lvar},#{rvar},#{kvar}| #{expression} }"
       end
     end

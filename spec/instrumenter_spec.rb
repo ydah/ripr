@@ -40,6 +40,81 @@ RSpec.describe "source instrumentation" do
     expect(scope.adult?(18)).to be(false)
   end
 
+  it "does not infect the empty Array operand of native addition and subtraction" do
+    source = "def self.copy(values, extra); values + extra; end"
+    scope, analysis, result = evaluate(source, operators: ["arithmetic"])
+    probe = Ripr::Probe.new(result.fetch(:site_table))
+    Ripr::R.probe = probe
+    Ripr::R.current_test = "test_empty"
+    value = +"entry"
+    array = [value].freeze
+
+    copy = scope.copy(array, [])
+    expect(copy).not_to equal(array)
+    expect(copy).not_to be_frozen
+    expect(copy.first).to equal(value)
+    expect(probe.snapshot.fetch("reach").values).to eq([["test_empty"]])
+    expect(probe.snapshot.fetch("infect")).to be_empty
+
+    Ripr::R.current_test = "test_nonempty"
+    expect(scope.copy(array, [value])).to eq([value, value])
+    id = analysis.fetch(:mutants).first.fetch(:id)
+    expect(probe.snapshot.fetch("infect").fetch(id)).to eq(["test_nonempty"])
+  end
+
+  it "treats subtraction as potentially infected if it is undefined on an Array receiver" do
+    scope, analysis, result = evaluate("def self.copy(values, extra); values + extra; end", operators: ["arithmetic"])
+    probe = Ripr::Probe.new(result.fetch(:site_table))
+    Ripr::R.probe = probe
+    Ripr::R.current_test = "test_missing"
+    array = [1]
+    class << array
+      undef_method :-
+    end
+
+    expect(scope.copy(array, [])).to eq([1])
+    id = analysis.fetch(:mutants).first.fetch(:id)
+    expect(probe.snapshot.fetch("infect").fetch(id)).to eq(["test_missing"])
+  end
+
+  it "does not mark a customized Array operation equal when it restores the native definition" do
+    scope, analysis, result = evaluate("def self.copy(values, extra); values + extra; end", operators: ["arithmetic"])
+    probe = Ripr::Probe.new(result.fetch(:site_table))
+    Ripr::R.probe = probe
+    Ripr::R.current_test = "test_custom"
+    array = [1]
+    original = Array.instance_method(:+)
+    calls = []
+    Array.define_method(:+) do |extra|
+      if equal?(array)
+        Array.define_method(:+, original)
+        calls << :custom
+      end
+      original.bind_call(self, extra)
+    end
+
+    expect(scope.copy(array, [])).to eq([1])
+    expect(calls).to eq([:custom])
+    id = analysis.fetch(:mutants).first.fetch(:id)
+    expect(probe.snapshot.fetch("infect").fetch(id)).to eq(["test_custom"])
+  ensure
+    Array.define_method(:+, original)
+  end
+
+  it "does not speculate on equality for application arrays" do
+    scope, analysis, result = evaluate("def self.matches(left, right); left == right; end")
+    Ripr::R.probe = Ripr::Probe.new(result.fetch(:site_table))
+    Ripr::R.current_test = "test_equality"
+    left = [1, 2]
+    called = false
+    trace = TracePoint.new(:c_call) { |event| called = true if event.method_id == :!= && event.self.equal?(left) }
+
+    expect(trace.enable { scope.matches(left, [1, 2]) }).to be(true)
+    expect(called).to be(false)
+    id = analysis.fetch(:mutants).first.fetch(:id)
+    expect(Ripr::R.probe.snapshot.fetch("infect").fetch(id)).to eq(["test_equality"])
+  end
+
   it "evaluates operands once in the original order without capturing user locals" do
     source = <<~RUBY
       def self.compare(events)

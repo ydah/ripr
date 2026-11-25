@@ -212,6 +212,107 @@ RSpec.describe "mutation runtime" do
     expect(Ripr::Value.same?("x".encode(Encoding::UTF_8), "x".encode(Encoding::US_ASCII))).to be(false)
   end
 
+  it "compares bounded plain arrays, hashes, ranges, and Data fields by their values" do
+    point = Data.define(:coordinates, :bounds)
+    left = point.new([1, { x: [true, nil] }], ..5)
+    right = point.new([1, { x: [true, nil] }], ..5)
+
+    expect(Ripr::Value.pure?(left)).to be(true)
+    expect(Ripr::Value.same?(left, right)).to be(true)
+    expect(Ripr::Value.same?(left, point.new(right.coordinates, ...5))).to be(false)
+    expect(Ripr::Value.same?(left, Data.define(:coordinates, :bounds).new(right.coordinates, right.bounds))).to be(false)
+  end
+
+  it "preserves differences that native collection equality can hide" do
+    [
+      [[1], [1.0]],
+      [[0.0], [-0.0]],
+      [{ first: 1, second: 2 }, { second: 2, first: 1 }],
+      [{ x: 1 }, Hash.new(5).merge(x: 1)],
+      [["x"], [+"x"]],
+      [{ x: 1 }, { x: 1 }.compare_by_identity]
+    ].each do |left, right|
+      expect(Ripr::Value.same?(left, right)).to be(false)
+    end
+  end
+
+  it "rejects unsupported collections even when one object appears on both sides" do
+    cycle = []
+    cycle << cycle
+    shared = [1]
+    frozen_unsupported = Object.new.freeze
+    values = [cycle, [shared, shared], [frozen_unsupported].freeze, Class.new(Array).new([1]),
+              Array.new(1_000, 1), 100.times.reduce(1) { |value, _index| [value] }, ["x" * 100_000],
+              Array.new(5) { Array.new(32, 1) }, Hash.new { raise "called a default proc" }, { x: 1 }.compare_by_identity]
+
+    values.each do |value|
+      expect(Ripr::Value.pure?(value)).to be(false)
+      expect(Ripr::Value.same?(value, value)).to be(false)
+    end
+  end
+
+  it "does not compare Hash keys whose insertion-time hash can differ from their current value" do
+    key = [1]
+    hash = { key => :value }
+    key << 2
+
+    expect(Ripr::Value.snapshot(hash)).to be_nil
+    expect(Ripr::Value.same?(hash, { [1, 2] => :value })).to be(false)
+  end
+
+  it "rejects user Data methods and singleton container methods without calling them" do
+    point = Data.define(:value) do
+      def ==(_other)
+        raise "called Data equality"
+      end
+    end
+    accessor = Data.define(:value) do
+      def value
+        raise "called a Data accessor"
+      end
+    end
+    range = 1..2
+    value = [1]
+    value.define_singleton_method(:length) { raise "called a singleton method" }
+    odd_range = Class.new(Range).new(range.begin, range.end)
+
+    [point.new(1), accessor.new(1), value, odd_range].each do |unsafe|
+      expect(Ripr::Value.pure?(unsafe)).to be(false)
+      expect(Ripr::Value.same?(unsafe, unsafe)).to be(false)
+    end
+  end
+
+  it "rejects a native alias in a collection's equality path" do
+    original = Array.instance_method(:==)
+    Array.alias_method(:==, :replace)
+
+    expect(Ripr::Value.pure?([1])).to be(false)
+  ensure
+    Array.define_method(:==, original)
+  end
+
+  it "rejects a missing native collection comparator even if Ruby inherits a fallback" do
+    original = Array.instance_method(:==)
+    Array.remove_method(:==)
+
+    expect(Ripr::Value.snapshot([1])).to be_nil
+  ensure
+    Array.define_method(:==, original)
+  end
+
+  it "snapshots mutation results without retaining mutable inputs" do
+    value = { x: [+"mutable", nil] }
+    before = Ripr::Value.snapshot(value)
+
+    expect(before).to be_frozen
+    expect(Ripr::Value.snapshot(nil)).not_to be_nil
+    expect(Ripr::Value.snapshot(Object.new)).to be_nil
+    value[:x][0].replace("changed")
+    expect(before).to eq(Ripr::Value.snapshot({ x: [+"mutable", nil] }))
+    expect(before).not_to eq(Ripr::Value.snapshot(value))
+    expect { JSON.generate(before) }.not_to raise_error
+  end
+
   it "records nil return values as uninfected and other returns as infected" do
     start_probe
     expect(Ripr::R.ret(site, nil)).to be_nil
@@ -252,7 +353,7 @@ RSpec.describe "mutation runtime" do
     expect(expected.fetch("samples").fetch(site)).to eq([[18, 18], [19, 18], [20, 18]])
     expect(expected.fetch("infect").fetch("adult-boundary")).to eq(["SampleTest#test_adult"])
 
-    expect(Ripr::Value).not_to receive(:pure?)
+    expect(Ripr::Value).not_to receive(:scalar?)
     expect(observe(21, 18)).to be(true)
     expect(Ripr::R.probe.snapshot).to eq(expected)
   end
