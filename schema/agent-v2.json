@@ -1,0 +1,120 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ripr.agent/v2",
+  "type": "object",
+  "required": ["schema", "run", "summary", "gaps", "methods", "weak_tests"],
+  "properties": {
+    "schema": {"const": "ripr.agent/v2"},
+    "run": {
+      "type": "object",
+      "required": ["since", "scope", "framework"],
+      "properties": {
+        "since": {"type": ["string", "null"]},
+        "scope": {"enum": ["node", "method"]},
+        "framework": {"enum": ["minitest", "rspec", null]}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["killed", "timeout", "error", "not_reached", "not_infected", "not_propagated", "not_revealed",
+                   "not_detected", "accepted", "survived", "score"],
+      "properties": {
+        "score": {"type": "number", "minimum": 0, "maximum": 100}
+      },
+      "additionalProperties": {"type": "number", "minimum": 0}
+    },
+    "gaps": {"type": "array", "items": {"$ref": "#/definitions/gap"}},
+    "methods": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file", "subject", "stages", "first_gap"],
+        "properties": {
+          "file": {"type": "string"},
+          "subject": {"type": "string"},
+          "stages": {
+            "type": "object",
+            "minProperties": 1,
+            "propertyNames": {"$ref": "#/definitions/stage"},
+            "additionalProperties": {"type": "integer", "minimum": 1}
+          },
+          "first_gap": {"type": "string", "description": "Full ID of the highest-priority gap in this method."}
+        }
+      }
+    },
+    "weak_tests": {
+      "type": "array",
+      "items": {
+        "allOf": [
+          {"$ref": "#/definitions/test"},
+          {"required": ["reached"], "properties": {"reached": {"type": "integer", "minimum": 1}}}
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "stage": {"enum": ["not_reached", "not_infected", "not_propagated", "not_revealed", "not_detected"]},
+    "test": {
+      "type": "object",
+      "required": ["id", "file", "line"],
+      "properties": {
+        "id": {"type": "string"},
+        "file": {"type": "string"},
+        "line": {"type": "integer", "minimum": 1}
+      }
+    },
+    "gap": {
+      "type": "object",
+      "required": ["id", "full_id", "stage", "priority", "action", "hint", "location", "subject", "operator", "original",
+                   "mutated", "observed", "covering_tests", "rerun", "accept"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-f0-9]{10}$"},
+        "full_id": {"type": "string"},
+        "stage": {"$ref": "#/definitions/stage"},
+        "priority": {"type": "integer", "minimum": 0, "maximum": 4},
+        "action": {"enum": ["add_test", "add_input", "strengthen_assertion"]},
+        "hint": {"type": "string"},
+        "load_reached": {"type": "boolean"},
+        "location": {
+          "type": "object",
+          "required": ["file", "line", "column"],
+          "properties": {
+            "file": {"type": "string"},
+            "line": {"type": "integer", "minimum": 1},
+            "column": {"type": "integer", "minimum": 1}
+          }
+        },
+        "subject": {"type": "string"},
+        "operator": {"type": "string"},
+        "original": {"type": "string"},
+        "mutated": {"type": "string"},
+        "observed": {"type": "array", "maxItems": 3, "items": {"type": "array"}},
+        "suggested_inputs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": ["number", "boolean", "null"]}}
+        },
+        "propagation": {
+          "type": "object",
+          "required": ["test_id", "call", "original", "mutant"],
+          "properties": {
+            "test_id": {"type": "string"},
+            "call": {"type": "integer", "minimum": 1},
+            "original": {"type": "array"},
+            "mutant": {"type": "array"}
+          }
+        },
+        "covering_tests": {"type": "array", "items": {"$ref": "#/definitions/test"}},
+        "rerun": {"type": "string"},
+        "accept": {"type": "string"}
+      },
+      "allOf": [
+        {"if": {"properties": {"stage": {"const": "not_reached"}}}, "then": {"properties": {"action": {"const": "add_test"}}}},
+        {"if": {"properties": {"stage": {"enum": ["not_infected", "not_propagated"]}}}, "then": {"properties": {"action": {"const": "add_input"}}}},
+        {"if": {"properties": {"stage": {"enum": ["not_revealed", "not_detected"]}}}, "then": {"properties": {"action": {"const": "strengthen_assertion"}}}},
+        {"if": {"properties": {"stage": {"const": "not_revealed"}}}, "then": {"required": ["propagation"]}}
+      ]
+    }
+  }
+}

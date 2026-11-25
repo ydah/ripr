@@ -89,9 +89,11 @@ Use `--verify-killed` to replay the selected tests on the original code in a fre
 
 ### Reports
 
-The default report is text. Write an HTML report and its `mutation.json` data to `.ripr/report/` with `bundle exec ripr --reporter html`. The interactive viewer requires network access, and the static table works offline.
+The default report is text. Write an HTML report and its `mutation.json` data to `.ripr/report/` with `bundle exec ripr --reporter html`. Open `index.html` to filter by diagnostic stage in the offline viewer. A static table is available with JavaScript disabled.
 
 For tools and coding agents, use `bundle exec ripr --since origin/main --reporter agent` to emit [JSON with a suggested action for each gap](schema/agent-v1.json). Keep `agent` as the only stdout reporter when piping JSON. Use `bundle exec ripr --only MUTANT_ID` to rerun a single mutation.
+
+Use `--reporter agent-v2` for [the full diagnostic stages, method summaries, and weak-test ranking](schema/agent-v2.json). The text report and v2 both prioritize gaps by changed lines, absent covering tests, missed assertions, and public methods. Each condition adds one point. The v1 reporter remains available as `--reporter agent`.
 
 Use `--profile` to write phase and worker timings in milliseconds, executed test counts, and cache hit rates to `.ripr/report/profile.json`. Diagnostic replays appear under `diagnosis`. Set `--report-dir` to change the destination. Interrupted workers have unknown test counts and are omitted from the tests-per-mutation average.
 

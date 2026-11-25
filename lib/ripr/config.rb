@@ -80,7 +80,7 @@ module Ripr
       unknown = self[:operators] - Core::Operators::FULL_NAMES
       raise ArgumentError, "unknown operators: #{unknown.join(', ')}" unless unknown.empty?
 
-      unknown = self[:reporters] - %w[text agent json html github]
+      unknown = self[:reporters] - %w[text agent agent-v2 json html github]
       raise ArgumentError, "unknown reporters: #{unknown.join(', ')}" unless unknown.empty?
 
       validate_mapping(:timeout, %w[factor base_ms])

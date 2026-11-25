@@ -20,7 +20,7 @@ require "tempfile"
 module Ripr
   module Engine
     class Runner
-      attr_reader :mutants, :warnings, :baseline, :framework, :sources, :static, :metrics, :profile
+      attr_reader :mutants, :warnings, :baseline, :framework, :sources, :static, :metrics, :profile, :changed_source_lines
 
       class RetryFull < Ripr::Error; end
 
@@ -41,6 +41,7 @@ module Ripr
         @table = {}
         @codes = {}
         @static = 0
+        @changed_source_lines = {}
         @metrics = { "baseline_reused" => false, "baseline_tests_run" => 0, "reused" => 0 }
         return unless @config[:profile]
 
@@ -141,12 +142,17 @@ module Ripr
         reach_map.write(result, tests, @test_files, @framework, base, git, database_inputs: database_inputs)
       end
 
+      def public_subjects
+        MethodExits.public_subjects(method_targets)
+      end
+
       private
 
       def select_mutants
         started = @profile&.now
         candidates = select_ids(@mutants)
         changes = changed_lines
+        @changed_source_lines = changes || {}
         selected = changes ? select_source_mutants(candidates, changes) : candidates
         selection = Selection.new(candidates, selected, changed_test_files(changes))
         @profile&.phase("plan", started)
@@ -216,13 +222,17 @@ module Ripr
         selected |= select_test_mutants(selection.candidates, selection.changed_tests) unless selection.changed_tests.empty?
         selected = check_types(selected) if @config[:typecheck]
         static_run = StaticRun.new(worker_config, @paths, boot_ms: boot_ms)
-        scheduler = Scheduler.new(worker_config, @baseline, @table, @cache, planned: @mutants, warnings: @warnings,
+        scheduler = Scheduler.new(worker_config, @baseline, @table, @cache, targets: method(:method_targets), warnings: @warnings,
                                                                             metrics: @metrics, rails: @rails,
                                                                             static_run: static_run, profile: @profile)
         results = scheduler.call(selected, adapter, &)
         @profile&.phase("mutation", started)
         @cache.write(results, @baseline, @metrics) unless @metrics["baseline_reach_map"]
         results
+      end
+
+      def method_targets
+        @method_targets ||= MethodExits.targets(@mutants)
       end
 
       def with_project(probe: nil, active: nil, observer: nil)
