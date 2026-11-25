@@ -142,15 +142,19 @@ module Ripr
         end
 
         def restore(input, database)
+          create_database(database) { sql("CREATE DATABASE #{identifier(database)}") }
+          restore_dump(input, database)
+        end
+
+        def create_database(database)
           reservation = marker(database)
           File.open(reservation, File::WRONLY | File::CREAT | File::EXCL, 0o600) { |file| file.puts(database) }
           begin
-            sql("CREATE DATABASE #{identifier(database)}")
+            yield
           rescue ArgumentError => e
             File.unlink(reservation) if duplicate_database?(e)
             raise
           end
-          restore_dump(input, database)
         end
 
         def remove(database)
@@ -165,14 +169,14 @@ module Ripr
         end
 
         def identifier(database)
-          raise ArgumentError, "invalid isolated Rails database name" unless database.match?(/\A#{@stem}_(?:parent|worker_\d+)\z/)
+          raise ArgumentError, "invalid isolated Rails database name" unless database.match?(/\A#{@stem}_(?:parent|template|worker_\d+)\z/)
 
           "#{quote}#{database}#{quote}"
         end
 
         def command(environment, *arguments, stdin_data: "")
-          _, error, status = Open3.capture3(environment, *arguments, stdin_data: stdin_data)
-          return if status.success?
+          output, error, status = Open3.capture3(environment, *arguments, stdin_data: stdin_data)
+          return output if status.success?
 
           raise ArgumentError, "Rails database command #{arguments.first} failed: #{error.strip}"
         rescue Errno::ENOENT
@@ -181,7 +185,60 @@ module Ripr
       end
 
       class PostgreSQL < Server
+        TEMPLATE_REJECTION = /\b(?:3D000|42501|55006):/
+
+        def capture
+          @template = nil
+          template = destination("template")
+          remove(template)
+          return super unless template_available? && clone_database(template, @parent)
+
+          dump(template, @ready)
+          @template = template if seal_template(template)
+        end
+
+        def worker(slot, fresh_boot:)
+          return super if fresh_boot || !@template
+
+          target = destination("worker_#{slot}")
+          remove(target)
+          restore(@ready, target) unless clone_database(target, @template)
+          target
+        end
+
         private
+
+        def template_available?
+          sql(<<~SQL).strip == "t"
+            SELECT NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = '#{@parent}')
+               AND NOT EXISTS (SELECT 1 FROM pg_prepared_xacts WHERE database = '#{@parent}')
+          SQL
+        rescue ArgumentError => e
+          raise unless TEMPLATE_REJECTION.match?(e.message)
+
+          false
+        end
+
+        def clone_database(database, template)
+          create_database(database) do
+            sql("CREATE DATABASE #{identifier(database)} TEMPLATE #{identifier(template)}")
+          end
+          true
+        rescue ArgumentError => e
+          raise unless TEMPLATE_REJECTION.match?(e.message)
+
+          File.unlink(marker(database))
+          false
+        end
+
+        def seal_template(template)
+          sql("ALTER DATABASE #{identifier(template)} ALLOW_CONNECTIONS false")
+          true
+        rescue ArgumentError => e
+          raise unless TEMPLATE_REJECTION.match?(e.message)
+
+          false
+        end
 
         def duplicate_database?(error)
           error.message.include?("42P04:")
@@ -207,7 +264,7 @@ module Ripr
 
         def sql(statement)
           command(environment, "psql", "--no-password", "--no-psqlrc", "--dbname=postgres", "--set=ON_ERROR_STOP=1",
-                  "--set=VERBOSITY=verbose", "--command=#{statement}")
+                  "--set=VERBOSITY=verbose", "--tuples-only", "--no-align", "--command=#{statement}")
         end
 
         def quote

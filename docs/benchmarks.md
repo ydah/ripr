@@ -42,6 +42,14 @@ With ripr at `e065271` and [Mutineer 1.8.2](https://github.com/davidteren/mutine
 
 Unpack the Mutineer 1.8.2 gem and pass its directory to `bundle exec ruby script/compare_verdicts.rb` to check the oracle. To check a corpus workload, add `--operators comparison` and pass the prepared project directory, mutated file, framework, and test globs after the Mutineer directory. Use `--rails` for Fizzy and `--mutineer-boot lib/diff-lcs.rb --mutineer-strategy redefine` for diff-lcs, whose whole-file reload would re-execute `undef :position`.
 
+### Core diagnosis
+
+At [`f17f988`](https://github.com/ydah/ripr/commit/f17f988) on Ruby 4.0.9, `bundle exec ruby script/self_mutate.rb` measured a 90.5% Core score. Of the 61 gaps whose v1 report kind was `not_detected`, three had unchanged observed exits and 13 had changes missed by tests. The remaining 45 lacked comparable, repeatable exit observations. The `core-mutations` CI artifact includes the per-mutation stages and examples.
+
+### PostgreSQL worker setup
+
+Seven paired runs on PostgreSQL 14 compared creating an empty worker database and restoring a dump against cloning the same snapshot as a template. Median worker setup fell from 77 to 62 ms for a 9.9 MB database with 2,000 rows and from 167 to 70 ms for a 22.2 MB database with 60,000 rows. Both produced the same data and schema checksums. Preparing the template adds one copy per ripr run.
+
 ## Reproduce
 
 Use Ruby 4.0.10, Bundler, Git, curl, tar, and the Fizzy system libraries listed in the [benchmark workflow](../.github/workflows/benchmark.yml). The runner downloads the archived revisions into temporary directories, installs dependencies, and writes wall-time samples, mutation counts, and ripr profiles to JSON.

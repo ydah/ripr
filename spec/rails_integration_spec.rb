@@ -92,6 +92,84 @@ if ENV["RIPR_TEST_RAILS"]
       expect(counts).to eq([2, 1, 1])
     end
 
+    if (postgresql_url = ENV.fetch("RIPR_TEST_POSTGRESQL", nil))
+      it "clones disconnected PostgreSQL snapshots and falls back to the same captured data" do
+        results = run_fixture(<<~'RUBY', url: postgresql_url)
+          require "json"
+          require "pg"
+          require "ripr/integration/rails_database"
+          require "tmpdir"
+
+          source = "ripr_snapshot_#{SecureRandom.hex(8)}_test"
+          admin = PG.connect(ENV.fetch("RIPR_TEST_DATABASE_URL"))
+          connection = admin.conninfo_hash.reject { |_, value| value.nil? || value.empty? }
+          connect = ->(name, &block) { PG.connect(connection.merge(dbname: name), &block) }
+          config = { database: source, host: connection[:host], port: connection[:port], username: connection[:user],
+                     password: connection[:password], sslmode: connection[:sslmode] }
+          rows = ->(session) { session.exec("SELECT label FROM widgets ORDER BY label").column_values(0) }
+          implementation = Ripr::Integration::RailsDatabase::PostgreSQL
+          with_late_write = Class.new(implementation) do
+            define_method(:dump) do |name, output|
+              super(name, output)
+              if output.end_with?("-ready")
+                connect.call(parent) { |session| session.exec("INSERT INTO widgets (label) VALUES ('during capture')") }
+              end
+            end
+          end
+          begin
+            admin.exec("CREATE DATABASE #{admin.quote_ident(source)}")
+            connect.call(source) do |original|
+              original.exec("CREATE TABLE widgets (id bigserial PRIMARY KEY, label text NOT NULL)")
+              original.exec("INSERT INTO widgets (label) VALUES ('original')")
+            end
+
+            prefixes = []
+            samples = [false, true].map.with_index do |connected, index|
+              Dir.mktmpdir do |directory|
+                database = (connected ? implementation : with_late_write).new(config, Dir.pwd, directory, index)
+                prefix = database.parent.delete_suffix("parent")
+                prefixes << prefix
+                parent = connect.call(database.parent)
+                parent.exec("INSERT INTO widgets (label) VALUES ('booted')")
+                parent.exec("ANALYZE widgets")
+                parent.close unless connected
+                database.capture
+
+                parent = connect.call(database.parent) unless connected
+                parent.exec("INSERT INTO widgets (label) VALUES ('after capture')")
+                parent.close
+                worker = database.worker(0, fresh_boot: false)
+                copied = connect.call(worker) do |session|
+                  statistics = session.exec("SELECT 1 FROM pg_stats WHERE tablename = 'widgets'")
+                  [rows.call(session), statistics.ntuples.positive?]
+                end
+                unless connected
+                  template = admin.exec_params("SELECT datname FROM pg_database WHERE starts_with(datname, $1) AND NOT datallowconn", [prefix])
+                  admin.exec("DROP DATABASE #{admin.quote_ident(template[0].fetch('datname'))}")
+                end
+                fallback = connect.call(database.worker(0, fresh_boot: false), &rows)
+                pristine = database.worker(0, fresh_boot: true)
+                [*copied, fallback, connect.call(pristine, &rows)]
+              ensure
+                parent&.close unless parent&.finished?
+                database&.close
+              end
+            end
+            leaked = admin.exec("SELECT datname FROM pg_database").column_values(0).select do |name|
+              prefixes.any? { |prefix| name.start_with?(prefix) }
+            end
+            puts JSON.generate([samples, connect.call(source, &rows), leaked])
+          ensure
+            admin.exec("DROP DATABASE IF EXISTS #{admin.quote_ident(source)}")
+            admin.close
+          end
+        RUBY
+
+        expect(results).to eq([[[%w[booted original], true, %w[booted original], ["original"]],
+                                [%w[booted original], false, %w[booted original], ["original"]]], ["original"], []])
+      end
+    end
+
     %w[sqlite postgresql mysql].each do |adapter|
       url = ENV.fetch("RIPR_TEST_#{adapter.upcase}", nil)
       next unless adapter == "sqlite" || url
