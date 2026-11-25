@@ -72,12 +72,16 @@ module Ripr
       end
 
       def capture(loading: true, methods: true, &)
-        events = methods ? %i[call return c_call c_return] : %i[return c_call c_return]
+        directory_returns = start_directory_return_trace(loading) unless methods
+        events = directory_returns ? %i[c_call c_return] : %i[return c_call c_return]
+        events.unshift(:call) if methods
         trace = TracePoint.new(*events) do |event|
           observe_effect(event, loading)
           record(event) if methods && event.event == :call
         end
         trace.enable(&)
+      ensure
+        directory_returns&.disable
       end
 
       def observations
@@ -169,6 +173,21 @@ module Ripr
         else
           @opaque_load = true
         end
+      end
+
+      def start_directory_return_trace(loading)
+        query = Dir.method(:[])
+        return unless query.source_location&.first == "<internal:dir>"
+
+        owner_thread = Thread.current
+        trace = TracePoint.new(:return) do |event|
+          observe_effect(event, loading) if Thread.current.equal?(owner_thread)
+        end
+        trace.enable(target: query)
+        trace
+      rescue ArgumentError, NameError
+        trace&.disable
+        nil
       end
 
       def observe_effect(event, loading)
