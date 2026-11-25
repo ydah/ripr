@@ -31,6 +31,7 @@ RSpec.describe "optional mutation operators" do
     expect(operators::NAMES).to eq(%w[comparison arithmetic integer_literal boolean_literal condition_negation boolean_connector
                                       return_nil statement_removal])
     expect(operators::FULL_NAMES - operators::NAMES).to eq(%w[string_literal regexp_literal collection_literal collection_method
+                                                              range_endpoint collection_query predicate_method fetch_index
                                                               safe_navigation compound_assignment case_when])
     expect(analyze('def value; ["a", /b/]; end').fetch(:mutants).map { |mutant| mutant[:operator] }).to eq(["return_nil"])
   end

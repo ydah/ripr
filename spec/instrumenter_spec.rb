@@ -40,6 +40,41 @@ RSpec.describe "source instrumentation" do
     expect(scope.adult?(18)).to be(false)
   end
 
+  it "switches opt-in Ruby operators without calling replacements during the baseline" do
+    source = <<~RUBY
+      def self.feature(store, events)
+        range = 1..2
+        odds = [1, 2].select { |value| events << value; value.odd? }
+        [range.include?(2), odds, 0.zero?, store.fetch(:key)]
+      end
+    RUBY
+    operators = %w[range_endpoint collection_query predicate_method fetch_index]
+    scope, analysis, result = evaluate(source, operators: operators)
+    store = Object.new
+    def store.fetch(key) = [:fetch, key]
+    def store.[](key) = [:index, key]
+
+    probe = Ripr::Probe.new(result.fetch(:site_table))
+    Ripr::R.probe = probe
+    Ripr::R.current_test = "feature"
+    events = []
+    expect(scope.feature(store, events)).to eq([true, [1], true, %i[fetch key]])
+    expect(events).to eq([1, 2])
+    expect(probe.snapshot.fetch("reach").size).to eq(4)
+
+    Ripr::R.probe = nil
+    expected = {
+      "range_endpoint" => [false, [1], true, %i[fetch key]],
+      "collection_query" => [true, [2], true, %i[fetch key]],
+      "predicate_method" => [true, [1], false, %i[fetch key]],
+      "fetch_index" => [true, [1], true, %i[index key]]
+    }
+    analysis.fetch(:sites).each do |site|
+      Ripr::R.activate(site.fetch(:key), 1)
+      expect(scope.feature(store, [])).to eq(expected.fetch(site.fetch(:operator)))
+    end
+  end
+
   it "does not infect the empty Array operand of native addition and subtraction" do
     source = "def self.copy(values, extra); values + extra; end"
     scope, analysis, result = evaluate(source, operators: ["arithmetic"])
