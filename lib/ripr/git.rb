@@ -9,6 +9,20 @@ module Ripr
       @root = File.expand_path(root)
     end
 
+    def clean_head
+      cache_entry = "?? #{project_prefix}.ripr/".b
+      status = execute("status", "--porcelain=v1", "-z", "--untracked-files=all").split("\0")
+      raise ArgumentError, "reach-map requires a clean Git worktree" unless status.all? { |entry| entry.start_with?(cache_entry) }
+
+      execute("rev-parse", "--verify", "HEAD^{commit}").strip
+    rescue Error => e
+      raise ArgumentError, e.message
+    end
+
+    def project_prefix
+      execute("rev-parse", "--show-prefix").chomp.force_encoding(Encoding::UTF_8)
+    end
+
     def changed_lines(ref, paths = nil, include_all_paths: false)
       base = execute("merge-base", "--", ref, "HEAD").strip
       selected = Array(paths)

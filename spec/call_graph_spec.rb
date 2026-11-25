@@ -98,6 +98,24 @@ RSpec.describe Ripr::Core::CallGraph do
     expect(graph(code.sub("7", "8")).signature(dependencies)).not_to eq(old_graph.signature(dependencies))
   end
 
+  it "exposes stable definition identities and marks deferred reach" do
+    project_path = +path
+    code = "def self.immediate = 5\ndef self.callback = -> { 7 }\n"
+    current = described_class.new(project_path => code)
+    project_path.replace("changed.rb")
+
+    original_path = current.source_path(File.expand_path(path))
+    expect(original_path).to eq(path)
+    expect(original_path).to be_frozen
+    first = current.methods_at(original_path, 1, :immediate).fetch(0)
+    callback = current.methods_at(original_path, 2, :callback).fetch(0)
+    expect(current.methods_at(original_path, 2, :immediate)).to be_empty
+    expect(current.method_hashes).to eq(current.signature([first, callback]))
+    expect(current.deferred_methods).to eq([callback])
+    expect(current.method_hashes).to be_frozen
+    expect(current.deferred_methods).to be_frozen
+  end
+
   it "refuses evidence from instruction sequence lookup and disassembly" do
     old_graph = graph(source)
     scope = Module.new.tap { |mod| mod.module_eval(source, path) }
