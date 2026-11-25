@@ -98,6 +98,25 @@ RSpec.describe "ripr shared shard plan" do
     expect(Ripr::Engine::ShardPlan.assign(costs.to_a.reverse.to_h, 2)).to eq(shards)
   end
 
+  it "reuses the same plan when the available memory changes the automatic worker limit" do
+    with_project do |directory|
+      FileUtils.mkdir_p(File.join(directory, ".ripr"))
+      helper = File.join(directory, ".ripr/worker-limit.rb")
+      worker_memory = File.expand_path("../lib/ripr/engine/worker_memory", __dir__)
+      File.write(helper, <<~RUBY)
+        require "etc"
+        require #{worker_memory.dump}
+        Etc.define_singleton_method(:nprocessors) { 4 }
+        Ripr::Engine::WorkerMemory.define_singleton_method(:limit) { File.exist?(".ripr/limited") ? 1 : 2 }
+      RUBY
+      env = { "RUBYOPT" => "#{ENV.fetch('RUBYOPT', '')} -r#{helper}" }
+      command(directory, "shard-plan", "2", "--jobs", "auto", env:)
+      File.write(File.join(directory, ".ripr/limited"), "")
+      output, = command(directory, "--shard", "1/2", "--jobs", "auto", "--reporter", "agent", env:)
+      expect(JSON.parse(output).dig("run", "metrics", "baseline_tests_run")).to eq(0)
+    end
+  end
+
   it "emits an empty fragment without booting when the diff has no mutations" do
     with_project do |directory|
       command(directory, "shard-plan", "2", "--since", "HEAD", "--shard-plan", ".ripr/empty.json")

@@ -251,11 +251,10 @@ module Ripr
           @profile&.phase("boot", started)
           baseline_started = @profile&.now
           method_hashes = @mutants.to_h { |mutant| [mutant.full_id, mutant.method_hash] }
-          cache_config = @sharding ? worker_config : @config
           test_ids = adapter.tests.map { |test| test.fetch("id") }
-          @cache = ResultCache.new(cache_config, sources: @sources, test_files: @test_files, framework: @framework, method_hashes:,
-                                                 test_ids:, probe_sites: probe_table.keys, graph: @call_graph,
-                                                 load_dependencies: @load_dependencies, shared_baseline: !@sharding.nil?)
+          @cache = ResultCache.new(@config, sources: @sources, test_files: @test_files, framework: @framework, method_hashes:,
+                                            test_ids:, probe_sites: probe_table.keys, graph: @call_graph,
+                                            load_dependencies: @load_dependencies, shared_baseline: !@sharding.nil?)
           Process.warmup
           if @sharding
             @shard_boot = @sharding.boot_identity(@framework, @test_files, discovered_tests(adapter), @rails, load_reached)
