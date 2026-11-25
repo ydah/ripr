@@ -22,6 +22,13 @@ module Ripr
     class Runner
       attr_reader :mutants, :warnings, :baseline, :framework, :sources, :static, :metrics, :profile
 
+      Selection = Data.define(:candidates, :selected, :changed_tests) do
+        def observed
+          changed_tests.empty? ? selected : candidates
+        end
+      end
+      private_constant :Selection
+
       def initialize(config, paths = [])
         @config = config
         @paths = paths
@@ -90,48 +97,12 @@ module Ripr
 
       def call(&)
         plan unless @planned
-        started = @profile&.now
-        candidates = select_ids(@mutants)
-        changes = changed_lines
-        selected = changes ? select_source_mutants(candidates, changes) : candidates
-        test_changes = changed_test_files(changes)
-        observed = test_changes.empty? ? selected : candidates
-        @profile&.phase("plan", started)
-        return selected.map { |mutant| mutant.to_record.merge("status" => "planned") } if @config[:dry_run]
-        return [] if observed.empty?
+        selection = select_mutants
+        return selection.selected.map { |mutant| mutant.to_record.merge("status" => "planned") } if @config[:dry_run]
+        return [] if selection.observed.empty?
 
-        if @config[:call_graph_reuse] && !(@config[:boot] || @config[:rails] || @config[:static] || @config[:verify_killed])
-          require_relative "../core/call_graph"
-          @call_graph = Core::CallGraph.new(@sources)
-        end
-        probe_table = @table.slice(*observed.map(&:site).uniq)
-        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        with_project(probe: Probe.new(probe_table, samples: @config[:samples])) do |adapter|
-          boot_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000
-          load_reached = R.probe.snapshot.fetch("load_reached")
-          R.probe = nil
-          worker_config = @config.with_worker_limit { WorkerMemory.limit }
-          @rails&.prepare_workers([worker_config[:jobs], observed.length].min)
-          @profile&.phase("boot", started)
-          baseline_started = @profile&.now
-          method_hashes = @mutants.to_h { |mutant| [mutant.full_id, mutant.method_hash] }
-          @cache = ResultCache.new(@config, sources: @sources, test_files: @test_files, framework: @framework, method_hashes:,
-                                            test_ids: adapter.tests.map { |test| test.fetch("id") }, probe_sites: probe_table.keys,
-                                            graph: @call_graph, load_dependencies: @load_dependencies)
-          Process.warmup
-          prepare_baseline(adapter, probe_table, load_reached)
-          @profile&.phase("baseline", baseline_started)
-          mutation_started = @profile&.now
-          selected |= select_test_mutants(candidates, test_changes) unless test_changes.empty?
-          selected = check_types(selected) if @config[:typecheck]
-          static_run = StaticRun.new(worker_config, @paths, boot_ms: boot_ms)
-          scheduler = Scheduler.new(worker_config, @baseline, @table, @cache, warnings: @warnings, metrics: @metrics,
-                                                                              rails: @rails, static_run: static_run, profile: @profile)
-          results = scheduler.call(selected, adapter, &)
-          @profile&.phase("mutation", mutation_started)
-          @cache.write(results, @baseline, @metrics)
-          results
-        end
+        prepare_call_graph
+        run_project(selection, &)
       end
 
       def run_static(full_id, test_ids)
@@ -143,6 +114,59 @@ module Ripr
       end
 
       private
+
+      def select_mutants
+        started = @profile&.now
+        candidates = select_ids(@mutants)
+        changes = changed_lines
+        selected = changes ? select_source_mutants(candidates, changes) : candidates
+        selection = Selection.new(candidates, selected, changed_test_files(changes))
+        @profile&.phase("plan", started)
+        selection
+      end
+
+      def prepare_call_graph
+        return unless @config[:call_graph_reuse] && !(@config[:boot] || @config[:rails] || @config[:static] || @config[:verify_killed])
+
+        require_relative "../core/call_graph"
+        @call_graph = Core::CallGraph.new(@sources)
+      end
+
+      def run_project(selection, &)
+        probe_table = @table.slice(*selection.observed.map(&:site).uniq)
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        with_project(probe: Probe.new(probe_table, samples: @config[:samples])) do |adapter|
+          boot_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000
+          load_reached = R.probe.snapshot.fetch("load_reached")
+          R.probe = nil
+          worker_config = @config.with_worker_limit { WorkerMemory.limit }
+          @rails&.prepare_workers([worker_config[:jobs], selection.observed.length].min)
+          @profile&.phase("boot", started)
+          baseline_started = @profile&.now
+          method_hashes = @mutants.to_h { |mutant| [mutant.full_id, mutant.method_hash] }
+          @cache = ResultCache.new(@config, sources: @sources, test_files: @test_files, framework: @framework, method_hashes:,
+                                            test_ids: adapter.tests.map { |test| test.fetch("id") }, probe_sites: probe_table.keys,
+                                            graph: @call_graph, load_dependencies: @load_dependencies)
+          Process.warmup
+          prepare_baseline(adapter, probe_table, load_reached)
+          @profile&.phase("baseline", baseline_started)
+          execute_selection(selection, adapter, worker_config, boot_ms, &)
+        end
+      end
+
+      def execute_selection(selection, adapter, worker_config, boot_ms, &)
+        started = @profile&.now
+        selected = selection.selected
+        selected |= select_test_mutants(selection.candidates, selection.changed_tests) unless selection.changed_tests.empty?
+        selected = check_types(selected) if @config[:typecheck]
+        static_run = StaticRun.new(worker_config, @paths, boot_ms: boot_ms)
+        scheduler = Scheduler.new(worker_config, @baseline, @table, @cache, warnings: @warnings, metrics: @metrics,
+                                                                            rails: @rails, static_run: static_run, profile: @profile)
+        results = scheduler.call(selected, adapter, &)
+        @profile&.phase("mutation", started)
+        @cache.write(results, @baseline, @metrics)
+        results
+      end
 
       def with_project(probe: nil, active: nil)
         previous_ripr = ENV.fetch("RIPR", nil)

@@ -18,6 +18,20 @@ module Ripr
       end
 
       def call(selected, adapter, &progress)
+        results, ready = classify(selected)
+        ready.sort_by! { |mutant| estimated_cost(mutant) }
+        timeout = method(:deadline)
+        completed = Child.batch(ready, jobs: @config[:jobs], timeout: timeout, on_complete: progress,
+                                       on_result: @profile&.method(:record_mutation)) do |mutant, slot|
+          execute(mutant, slot, adapter)
+        end
+        originals = @config[:verify_killed] ? verify_kills(completed, adapter, timeout) : {}
+        results.concat(record_results(completed, originals)).sort_by { |mutant| mutant.fetch("full_id") }
+      end
+
+      private
+
+      def classify(selected)
         probe = @baseline.fetch("probe")
         tests = @baseline.fetch("tests")
         test_order = Hash.new { |order, id| order[id] = [tests.fetch(id).fetch("duration_ms"), id] }
@@ -59,21 +73,21 @@ module Ripr
             nil
           end
         end
-        cost = lambda do |mutant|
-          mutant.fetch("test_ids").sum { |id| @baseline.fetch("tests").fetch(id).fetch("duration_ms") }
-        end
-        timeout = lambda do |mutant|
-          boot_ms = mutant["static"] ? 2 * @static_run.boot_ms : 0
-          @config[:timeout].fetch("base_ms") + (@config[:timeout].fetch("factor") * cost.call(mutant)) +
-            boot_ms + (@rails&.worker_timeout_ms || 0)
-        end
-        on_result = @profile&.method(:record_mutation)
-        ready.sort_by!(&cost)
-        completed = Child.batch(ready, jobs: @config[:jobs], timeout: timeout, on_complete: progress, on_result:) do |mutant, slot|
-          execute(mutant, slot, adapter)
-        end
-        originals = @config[:verify_killed] ? verify_kills(completed, adapter, timeout) : {}
-        completed.each do |mutant, outcome|
+        [results, ready]
+      end
+
+      def estimated_cost(mutant)
+        mutant.fetch("test_ids").sum { |id| @baseline.fetch("tests").fetch(id).fetch("duration_ms") }
+      end
+
+      def deadline(mutant)
+        boot_ms = mutant["static"] ? 2 * @static_run.boot_ms : 0
+        @config[:timeout].fetch("base_ms") + (@config[:timeout].fetch("factor") * estimated_cost(mutant)) +
+          boot_ms + (@rails&.worker_timeout_ms || 0)
+      end
+
+      def record_results(completed, originals)
+        completed.map do |mutant, outcome|
           status = outcome["status"] || (outcome["success"] ? "not_detected" : "killed")
           failure = outcome["failures"]&.first
           error = outcome["error"]
@@ -94,12 +108,9 @@ module Ripr
                                                                           "error" => error)
           result["verified"] = true if verification
           result["dependency_hashes"] = outcome["dependency_hashes"] if outcome["dependency_hashes"]
-          results << result
+          result
         end
-        results.sort_by { |mutant| mutant.fetch("full_id") }
       end
-
-      private
 
       def execute(mutant, slot, adapter, original: false)
         tests = mutant.fetch("test_ids")
