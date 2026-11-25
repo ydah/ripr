@@ -10,6 +10,8 @@
 - Avoid SQLite snapshot lock contention between Rails workers.
 - Skip equivalent native array additions and subtractions with an empty right operand.
 - Distinguish unchanged method exits from changed returns or exceptions missed by assertions.
+- Group gaps by method and expose ranked diagnostics through agent JSON v2.
+- Include an offline HTML viewer with a diagnostic stage filter.
 
 ## 0.2.0 — 2026-11-24
 

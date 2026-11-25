@@ -33,6 +33,8 @@ module Ripr
       METHOD_ORIGINAL_NAME = UnboundMethod.instance_method(:original_name)
       METHOD_SOURCE = UnboundMethod.instance_method(:source_location)
       METHOD_BIND = UnboundMethod.instance_method(:bind)
+      UNBIND = Method.instance_method(:unbind)
+      PUBLIC_METHOD = Module.instance_method(:public_method_defined?)
 
       Subject = Struct.new(:target, :calls, :call_count, :iseq)
       Frame = Struct.new(:subject, :test, :calls, :index, :ambient_exception, :raised)
@@ -50,6 +52,13 @@ module Ripr
           target = resolve_target(definitions.first)
           targets[subject] = target if target
         end.freeze
+      end
+
+      def self.public_subjects(targets)
+        targets.filter_map do |subject, target|
+          method = target.is_a?(Method) ? UNBIND.bind_call(target) : target
+          [subject, true] if PUBLIC_METHOD.bind_call(METHOD_OWNER.bind_call(method), METHOD_NAME.bind_call(method), false)
+        end.to_h.freeze
       end
 
       def self.resolve_target(mutant)
