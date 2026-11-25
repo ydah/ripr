@@ -9,6 +9,8 @@ module Ripr
       FINITE = Float.instance_method(:finite?)
       PATTERNS = %i[match_predicate_node match_required_node in_node alternation_pattern_node array_pattern_node
                     capture_pattern_node find_pattern_node hash_pattern_node].freeze
+      LOGICAL_ASSIGNMENTS = %i[local_variable instance_variable class_variable global_variable constant constant_path call index]
+                            .product(%i[or and]).map { |target, operator| :"#{target}_#{operator}_write_node" }.freeze
       PREDICATES = { positive?: "negative?", negative?: "positive?", present?: "blank?", blank?: "present?" }.freeze
 
       Definition = Data.define(:node_types, :matcher, :variants, :mode, :infection_condition, :comparator, :instrument_template) do
@@ -24,6 +26,7 @@ module Ripr
           case instrument_template
           when :condition then "!(#{original})"
           when :return then "(#{original}; nil)"
+          when :pattern then "#{original} if #{replacement}"
           else original.byteslice(0, offset) + replacement + original.byteslice((offset + length)..)
           end
         end
@@ -187,6 +190,17 @@ module Ripr
         operator ? [[node, nil, "#{operator}=", node.binary_operator_loc]] : []
       end
 
+      def self.logical_assignment_variants(node)
+        [[node, nil, "=", node.operator_loc]]
+      end
+
+      def self.case_in_variants(node)
+        pattern = node.pattern
+        return [] if pattern.is_a?(Prism::IfNode) || pattern.is_a?(Prism::UnlessNode) || !single_line?(pattern)
+
+        [[pattern, "pattern", "false", pattern.location]]
+      end
+
       def self.case_variants(node)
         replacement = node.predicate ? "->(*) { false }" : "false"
         node.conditions.each_with_index.flat_map do |branch, branch_index|
@@ -227,13 +241,20 @@ module Ripr
           { select: "reject", reject: "select", min: "max", max: "min", any?: "all?", all?: "any?" }.freeze,
           nodes: [:call_node], matcher: method(:collection_query?)
         ),
+        "collection_none" => definition({ any?: "none?", none?: "any?" }.freeze, nodes: [:call_node], matcher: method(:collection_query?)),
         "predicate_method" => definition(method(:predicate_variants), nodes: [:call_node], matcher: method(:predicate_call?)),
         "fetch_index" => definition(method(:fetch_index_variants), nodes: [:call_node], matcher: method(:fetch_index?)),
         "safe_navigation" => definition(method(:safe_navigation_variants), nodes: [:call_node], matcher: method(:safe_navigation?)),
         "compound_assignment" => definition(
           method(:compound_variants), nodes: [:other], matcher: ->(node, _) { single_line?(node) && node.respond_to?(:binary_operator_loc) }
         ),
-        "case_when" => definition(method(:case_variants), matcher: ->(node, _) { node.is_a?(Prism::CaseNode) })
+        "logical_assignment" => definition(
+          method(:logical_assignment_variants), nodes: LOGICAL_ASSIGNMENTS, matcher: ->(node, _) { single_line?(node) }
+        ),
+        "case_when" => definition(method(:case_variants), matcher: ->(node, _) { node.is_a?(Prism::CaseNode) }),
+        "case_in" => definition(
+          method(:case_in_variants), matcher: ->(node, _) { node.is_a?(Prism::InNode) }, mode: "always", template: :pattern
+        )
       }.freeze
       REGISTRY = DEFAULT.merge(EXTENDED).freeze
       NAMES = DEFAULT.keys.freeze
@@ -271,7 +292,7 @@ module Ripr
                            :regexp_literal?, :regexp_variants, :collection_literal?, :collection_variants, :collection_call?,
                            :range_expression?, :range_variants, :plain_call?, :collection_query?, :predicate_call?, :predicate_variants,
                            :fetch_index?, :fetch_index_variants, :safe_navigation?, :safe_navigation_variants, :compound_variants,
-                           :case_variants
+                           :logical_assignment_variants, :case_in_variants, :case_variants
     end
   end
 end

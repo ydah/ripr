@@ -75,6 +75,65 @@ RSpec.describe "source instrumentation" do
     end
   end
 
+  it "evaluates the receiver and index once and preserves logical assignment short-circuiting" do
+    source = <<~RUBY
+      def self.pick(store, events)
+        (events << :receiver; store)[(events << :index; :key)] ||= (events << :rhs; :fresh)
+      end
+    RUBY
+    scope, analysis, = evaluate(source, operators: ["logical_assignment"])
+    events = []
+    store = Object.new
+    store.define_singleton_method(:[]) do |key|
+      events << [:read, key]
+      :original
+    end
+    store.define_singleton_method(:[]=) { |key, value| events << [:write, key, value] }
+    expect(scope.pick(store, events)).to eq(:original)
+    expect(events).to eq([:receiver, :index, %i[read key]])
+
+    events.clear
+    Ripr::R.activate(analysis.fetch(:sites).first.fetch(:key), 1)
+    expect(scope.pick(store, events)).to eq(:fresh)
+    expect(events).to eq([:receiver, :index, :rhs, %i[write key fresh]])
+  end
+
+  it "disables a matched case pattern without undoing its bindings or repeating its dispatch" do
+    source = <<~RUBY
+      def self.pick(item)
+        case item
+        in [Integer => n]
+          [:matched, n]
+        else
+          [:other, n]
+        end
+      end
+    RUBY
+    scope, analysis, result = evaluate(source, operators: ["case_in"])
+    events = []
+    item = Object.new
+    item.define_singleton_method(:deconstruct) do
+      events << :deconstruct
+      [2]
+    end
+    probe = Ripr::Probe.new(result.fetch(:site_table))
+    Ripr::R.probe = probe
+    Ripr::R.current_test = "unmatched"
+    expect(scope.pick(:unmatched)).to eq([:other, nil])
+    expect(probe.snapshot.fetch("reach")).to be_empty
+    Ripr::R.current_test = "matched"
+    expect(scope.pick(item)).to eq([:matched, 2])
+    expect(events).to eq([:deconstruct])
+
+    site = analysis.fetch(:sites).first.fetch(:key)
+    expect(probe.snapshot.fetch("reach").fetch(site)).to eq(["matched"])
+    expect(probe.snapshot.fetch("infect").fetch(analysis.fetch(:mutants).first.fetch(:id))).to eq(["matched"])
+    Ripr::R.probe = nil
+    Ripr::R.activate(site, 1)
+    expect(scope.pick(item)).to eq([:other, 2])
+    expect(events).to eq(%i[deconstruct deconstruct])
+  end
+
   it "does not infect the empty Array operand of native addition and subtraction" do
     source = "def self.copy(values, extra); values + extra; end"
     scope, analysis, result = evaluate(source, operators: ["arithmetic"])
