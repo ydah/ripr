@@ -15,7 +15,8 @@ module Ripr
       timeout: { "factor" => 2.0, "base_ms" => 1000 }, samples: true,
       reporters: ["text"], report_dir: ".ripr/report", since: nil, only: [], full: false,
       dry_run: false, fail_on_survived: false, verify_not_infected: false, verify_killed: false, seed: 0, boot: nil, rails: false,
-      include_tests_diff: false, static: false, call_graph_reuse: false, typecheck: nil, profile: false, baseline_runs: 1
+      include_tests_diff: false, static: false, call_graph_reuse: false, typecheck: nil, profile: false, reach_map: nil,
+      reach_map_files: [], baseline_runs: 1
     }.freeze
 
     def self.load(overrides = {}, path: ".ripr.yml")
@@ -76,7 +77,7 @@ module Ripr
         raise ArgumentError, "baseline-runs must be a positive integer"
       end
 
-      %i[include exclude arid_callees operators reporters only].each do |key|
+      %i[include exclude arid_callees operators reporters only reach_map_files].each do |key|
         raise ArgumentError, "#{key} must be a list of strings" unless self[key].is_a?(Array) && self[key].all?(String)
       end
       unknown = self[:operators] - Core::Operators::FULL_NAMES
@@ -100,6 +101,11 @@ module Ripr
                                                                           (self[:tests].is_a?(Array) && self[:tests].all?(String))
 
       raise ArgumentError, "boot must be a file path" unless self[:boot].nil? || (self[:boot].is_a?(String) && !self[:boot].empty?)
+      unless self[:reach_map].nil? || (self[:reach_map].is_a?(String) && !self[:reach_map].empty?)
+        raise ArgumentError, "reach-map must be a file path"
+      end
+      raise ArgumentError, "--reach-map-files requires --reach-map" if !self[:reach_map_files].empty? && !self[:reach_map]
+
       raise ArgumentError, "typecheck must be sorbet or rbs" unless self[:typecheck].nil? || %w[sorbet rbs].include?(self[:typecheck])
 
       %i[samples full dry_run fail_on_survived verify_not_infected verify_killed rails
