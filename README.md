@@ -84,6 +84,8 @@ The default report is text. Write an HTML report and its `mutation.json` data to
 
 For tools and coding agents, use `bundle exec ripr --since origin/main --reporter agent` to emit [JSON with a suggested action for each gap](schema/agent-v1.json). Keep `agent` as the only stdout reporter when piping JSON. Use `bundle exec ripr --only MUTANT_ID` to rerun a single mutation.
 
+Use `--profile` to write phase and worker timings in milliseconds, executed test counts, and cache hit rates to `.ripr/report/profile.json`. Set `--report-dir` to change the destination. Interrupted workers have unknown test counts and are omitted from the tests-per-mutation average.
+
 Install the [bundled agent skill](skills/mutation-test-loop/SKILL.md) with `bundle exec ripr init-skill`. The default destination is `.claude/skills/mutation-test-loop`. Use `--dir` to choose another directory.
 
 To connect an MCP client, start `bundle exec ripr mcp` over stdio with the target project as its working directory. The `ripr_run` tool accepts an optional Git base, and `ripr_recheck` reruns a mutation by short ID.

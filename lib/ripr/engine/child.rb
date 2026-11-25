@@ -9,7 +9,7 @@ module Ripr
         batch([nil], jobs: 1, timeout: ->(_) { timeout_ms }) { block.call }.first.last
       end
 
-      def self.batch(tasks, jobs:, timeout:, on_complete: nil, &)
+      def self.batch(tasks, jobs:, timeout:, on_complete: nil, on_result: nil, &)
         pending = tasks.dup
         active = {}
         completed = []
@@ -18,7 +18,9 @@ module Ripr
         until pending.empty? && active.empty?
           while active.length < jobs && !pending.empty?
             task = pending.shift
+            started = monotonic if on_result
             state = spawn_child(task, timeout.call(task), slots.pop, &)
+            state[:started] = started if on_result
             active[state.fetch(:reader)] = state
           end
           ready = IO.select(active.keys, nil, nil, 0.01)&.first || []
@@ -36,6 +38,7 @@ module Ripr
             active.delete(state.fetch(:reader))
             state.fetch(:reader).close
             slots << state.fetch(:slot)
+            on_result&.call(state.fetch(:task), payload, (monotonic - state.fetch(:started)) * 1000)
             on_complete&.call(completed.length, tasks.length)
           end
         end

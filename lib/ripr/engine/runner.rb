@@ -18,7 +18,7 @@ require "tempfile"
 module Ripr
   module Engine
     class Runner
-      attr_reader :mutants, :warnings, :baseline, :framework, :sources, :static, :metrics
+      attr_reader :mutants, :warnings, :baseline, :framework, :sources, :static, :metrics, :profile
 
       def initialize(config, paths = [])
         @config = config
@@ -30,11 +30,16 @@ module Ripr
         @codes = {}
         @static = 0
         @metrics = { "baseline_reused" => false, "baseline_tests_run" => 0, "reused" => 0 }
+        return unless @config[:profile]
+
+        require_relative "profile"
+        @profile = Profile.new
       end
 
       def plan
         return @mutants if @planned
 
+        started = @profile&.now
         patterns = if @paths.empty?
                      @config[:include]
                    else
@@ -49,7 +54,9 @@ module Ripr
             File.binread(path), path, operators: @config[:operators], arid_callees: @config[:arid_callees], static: @config[:static]
           )
           source = @sources[path] = analysis.fetch(:source)
+          instrument_started = @profile&.now
           instrumented = Core::Instrumenter.call(source, path, analysis.fetch(:sites))
+          @profile&.phase("instrument", instrument_started)
           @codes[File.expand_path(path)] = instrumented.fetch(:code) unless instrumented.fetch(:site_table).empty?
           @table.merge!(instrumented.fetch(:site_table))
           analysis.fetch(:mutants).each do |mutant|
@@ -71,16 +78,19 @@ module Ripr
           end
         end
         @planned = true
+        @profile&.phase("plan", started)
         @mutants
       end
 
       def call(&)
         plan unless @planned
+        started = @profile&.now
         candidates = select_ids(@mutants)
         changes = changed_lines
         selected = changes ? select_source_mutants(candidates, changes) : candidates
         test_changes = changed_test_files(changes)
         observed = test_changes.empty? ? selected : candidates
+        @profile&.phase("plan", started)
         return selected.map { |m| m.merge("status" => "planned") } if @config[:dry_run]
         return [] if observed.empty?
 
@@ -95,16 +105,21 @@ module Ripr
           load_reached = R.probe.snapshot.fetch("load_reached")
           R.probe = nil
           @rails&.prepare_workers([@config[:jobs], observed.length].min)
+          @profile&.phase("boot", started)
+          baseline_started = @profile&.now
           @cache = ResultCache.new(@config, sources: @sources, test_files: @test_files, framework: @framework, mutants: @mutants,
                                             test_ids: adapter.tests.map { |test| test.fetch("id") }, probe_sites: probe_table.keys,
                                             graph: @call_graph, load_dependencies: @load_dependencies)
           prepare_baseline(adapter, probe_table, load_reached)
+          @profile&.phase("baseline", baseline_started)
+          mutation_started = @profile&.now
           selected |= select_test_mutants(candidates, test_changes) unless test_changes.empty?
           selected = check_types(selected) if @config[:typecheck]
           static_run = StaticRun.new(@config, @paths, boot_ms: boot_ms)
           scheduler = Scheduler.new(@config, @baseline, @table, @cache, warnings: @warnings, metrics: @metrics,
-                                                                        rails: @rails, static_run: static_run)
+                                                                        rails: @rails, static_run: static_run, profile: @profile)
           results = scheduler.call(selected, adapter, &)
+          @profile&.phase("mutation", mutation_started)
           @cache.write(results, @baseline, @metrics)
           results
         end

@@ -54,6 +54,17 @@ module Ripr
         record.merge(mutant).merge("reused" => true)
       end
 
+      def previous_killer(mutant, ids, tests)
+        records = (@kill_history ||= kill_history(tests)).fetch(mutant.fetch("site"), [])
+        candidates = records.select { |record| ids.include?(record.fetch("killed_by")) }
+        exact = candidates.find { |record| record.fetch("full_id") == mutant.fetch("full_id") }
+        latest = exact || candidates.max_by do |record|
+          timestamp = record["recorded_at"]
+          [timestamp.is_a?(String) ? timestamp : "", record.fetch("full_id")]
+        end
+        latest&.fetch("killed_by")
+      end
+
       def write(results, baseline, metrics)
         current = @mutants.to_h { |mutant| [mutant.fetch("full_id"), mutant] }
         records = @previous.fetch("mutants", {}).select do |id, record|
@@ -74,6 +85,30 @@ module Ripr
       end
 
       private
+
+      def kill_history(tests)
+        baseline = @previous["baseline"]
+        old_tests = baseline["tests"] if baseline.is_a?(Hash)
+        old_hashes = @previous["test_hashes"]
+        return {} unless old_tests.is_a?(Hash) && old_hashes.is_a?(Hash)
+
+        history = Hash.new { |sites, site| sites[site] = [] }
+        @previous.fetch("mutants", {}).each do |id, record|
+          site = record["site"]
+          killer = record["killed_by"]
+          next unless record["status"] == "killed" && record["full_id"] == id && site.is_a?(String) && id.start_with?("#{site}::")
+          next unless killer.is_a?(String) && valid_record?(record) && record["tests"].is_a?(Hash)
+
+          old_test = old_tests[killer]
+          current = tests[killer]
+          next unless old_test.is_a?(Hash) && current && old_test.values_at("file", "line") == current.values_at("file", "line")
+
+          file = current.fetch("file")
+          hash = @test_hashes[file]
+          history[site] << record if hash && old_hashes[file] == hash && record["tests"].fetch(file, hash) == hash
+        end
+        history
+      end
 
       def reusable_graph?(record, mutant, probe)
         return false unless @graph && probe && record.is_a?(Hash) && record["graph_context"] == @graph_context

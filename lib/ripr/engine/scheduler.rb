@@ -5,7 +5,7 @@ require_relative "child"
 module Ripr
   module Engine
     class Scheduler
-      def initialize(config, baseline, table, cache, warnings:, metrics:, rails: nil, static_run: nil)
+      def initialize(config, baseline, table, cache, warnings:, metrics:, rails: nil, static_run: nil, profile: nil)
         @config = config
         @baseline = baseline
         @table = table
@@ -14,10 +14,13 @@ module Ripr
         @metrics = metrics
         @rails = rails
         @static_run = static_run
+        @profile = profile
       end
 
       def call(selected, adapter, &progress)
         probe = @baseline.fetch("probe")
+        tests = @baseline.fetch("tests")
+        test_order = Hash.new { |order, id| order[id] = [tests.fetch(id).fetch("duration_ms"), id] }
         ready = []
         results = selected.filter_map do |mutant|
           reach = probe.fetch("reach").fetch(mutant.fetch("site"), [])
@@ -39,6 +42,7 @@ module Ripr
             @metrics["reused"] += 1
             cached.merge(data)
           elsif status && !verify
+            @profile&.skip_mutation(status)
             data.merge("status" => status)
           else
             ids = if unknown_reach
@@ -48,7 +52,9 @@ module Ripr
                   end
             ids = reach if ids.empty?
             ids = @baseline.fetch("tests").keys if ids.empty?
-            ids.sort_by! { |id| @baseline.fetch("tests").fetch(id).fetch("duration_ms") }
+            killer = @cache.previous_killer(mutant, ids, tests)
+            ids = ids.sort_by { |id| test_order[id] }
+            ids.unshift(ids.delete(killer)) if killer && killer != ids.first
             ready << data.merge("test_ids" => ids, "verification_status" => verify ? status : nil)
             nil
           end
@@ -61,7 +67,9 @@ module Ripr
           @config[:timeout].fetch("base_ms") + (@config[:timeout].fetch("factor") * cost.call(mutant)) +
             boot_ms + (@rails&.worker_timeout_ms || 0)
         end
-        completed = Child.batch(ready.sort_by(&cost), jobs: @config[:jobs], timeout: timeout, on_complete: progress) do |mutant, slot|
+        on_result = @profile&.method(:record_mutation)
+        ready.sort_by!(&cost)
+        completed = Child.batch(ready, jobs: @config[:jobs], timeout: timeout, on_complete: progress, on_result:) do |mutant, slot|
           execute(mutant, slot, adapter)
         end
         originals = @config[:verify_killed] ? verify_kills(completed, adapter, timeout) : {}
@@ -116,7 +124,7 @@ module Ripr
 
       def verify_kills(completed, adapter, timeout)
         killed = completed.filter_map { |mutant, result| mutant if !result["status"] && !result["success"] }
-        Child.batch(killed, jobs: @config[:jobs], timeout: timeout) do |mutant, slot|
+        Child.batch(killed, jobs: @config[:jobs], timeout: timeout, on_result: @profile&.method(:record_replay)) do |mutant, slot|
           execute(mutant, slot, adapter, original: true)
         end.to_h
       end

@@ -68,6 +68,7 @@ module Ripr
         options.on("--no-samples") { @overrides[:samples] = false }
         options.on("--boot FILE") { |v| @overrides[:boot] = v }
         options.on("--typecheck CHECKER") { |v| @overrides[:typecheck] = v }
+        options.on("--profile", "Write profiling data to profile.json in the report directory") { @overrides[:profile] = true }
         %w[full dry-run fail-on-survived verify-not-infected verify-killed rails include-tests-diff static call-graph-reuse].each do |name|
           options.on("--#{name}") { @overrides[name.tr("-", "_").to_sym] = true }
         end
@@ -116,7 +117,10 @@ module Ripr
                   end
                 end
       runner.warnings.each { |message| @stderr.puts "ripr: #{message}" }
+      report_started = runner.profile&.now
       summary = Reporters.write(results, runner, config, stdout: @stdout)
+      runner.profile&.phase("report", report_started)
+      runner.profile&.write(config[:report_dir], results.length, runner.metrics, runner.baseline)
       return 0 if config[:dry_run] || command == "list"
       return 2 if config[:fail_on_survived] && summary.fetch("survived").positive?
       return 2 if config[:thresholds]["break"] && summary.fetch("score") < config[:thresholds].fetch("break")

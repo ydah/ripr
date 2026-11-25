@@ -15,7 +15,7 @@ module Ripr
       timeout: { "factor" => 2.0, "base_ms" => 1000 }, samples: true,
       reporters: ["text"], report_dir: ".ripr/report", since: nil, only: [], full: false,
       dry_run: false, fail_on_survived: false, verify_not_infected: false, verify_killed: false, seed: 0, boot: nil, rails: false,
-      include_tests_diff: false, static: false, call_graph_reuse: false, typecheck: nil
+      include_tests_diff: false, static: false, call_graph_reuse: false, typecheck: nil, profile: false
     }.freeze
 
     def self.load(overrides = {}, path: ".ripr.yml")
@@ -92,7 +92,7 @@ module Ripr
       raise ArgumentError, "typecheck must be sorbet or rbs" unless self[:typecheck].nil? || %w[sorbet rbs].include?(self[:typecheck])
 
       %i[samples full dry_run fail_on_survived verify_not_infected verify_killed rails
-         include_tests_diff static call_graph_reuse].each do |key|
+         include_tests_diff static call_graph_reuse profile].each do |key|
         raise ArgumentError, "#{key} must be true or false" unless [true, false].include?(self[key])
       end
       return unless self[:include_tests_diff] && !self[:full] && (!self[:since] || self[:dry_run])
