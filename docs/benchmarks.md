@@ -36,6 +36,12 @@ On the same host and Ruby version, five alternating pairs on Fizzy ran 27 baseli
 
 Use the Fizzy setup above with `--rails --full --profile --jobs 4 --timeout-base 10000 --operators comparison,condition_negation,return_nil`. Target `app/models/assignment.rb` and `app/models/card/{assignable,taggable,closeable}.rb`. For the control, preload a Ruby file defining `def Process.warmup; end` via `RUBYOPT=-r/path/to/file.rb`.
 
+### Cross-tool verdicts
+
+With ripr at `e065271` and [Mutineer 1.8.2](https://github.com/davidteren/mutineer/tree/354c77deb972b2d6e663b5218e0a20b41217f69a), both tools killed all 52 comparison variants with identical source edits across the four pinned workloads. The handwritten oracle added eight executed pairs with matching verdicts, including six survivors, and one edit reached by neither tool.
+
+Unpack the Mutineer 1.8.2 gem and pass its directory to `bundle exec ruby script/compare_verdicts.rb` to check the oracle. To check a corpus workload, add `--operators comparison` and pass the prepared project directory, mutated file, framework, and test globs after the Mutineer directory. Use `--rails` for Fizzy and `--mutineer-boot lib/diff-lcs.rb --mutineer-strategy redefine` for diff-lcs, whose whole-file reload would re-execute `undef :position`.
+
 ## Reproduce
 
 Use Ruby 4.0.10, Bundler, Git, curl, tar, and the Fizzy system libraries listed in the [benchmark workflow](../.github/workflows/benchmark.yml). The runner downloads the archived revisions into temporary directories, installs dependencies, and writes wall-time samples, mutation counts, and ripr profiles to JSON.
