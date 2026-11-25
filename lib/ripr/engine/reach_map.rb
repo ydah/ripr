@@ -9,7 +9,7 @@ require_relative "../version"
 module Ripr
   module Engine
     class ReachMap
-      VERSION = 3
+      VERSION = 4
       PATH = ".ripr/reach-map.json"
       TEST_INPUTS = %w[test/**/* spec/**/* .rspec .rspec-local].freeze
       BOOT_INPUTS = %w[config/**/* db/**/* Gemfile Gemfile.lock gems.rb gems.locked .env* .ripr.yml].freeze
@@ -136,7 +136,7 @@ module Ripr
         inputs = test_inputs(test_files + tests.values.map { |test| test.fetch("file") })
         manifest = provenance.merge("version" => VERSION, "base" => base, "project_prefix" => git.project_prefix,
                                     "framework" => framework, "database_inputs" => database_inputs, "tests" => tests,
-                                    "test_order" => tests.keys, "test_files" => inputs)
+                                    "test_order" => tests.keys, "test_files" => inputs, "test_load_order" => test_files)
         atomic_write(manifest.merge(result.fetch("observations")))
         PATH
       end

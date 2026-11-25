@@ -22,6 +22,8 @@ module Ripr
     class Runner
       attr_reader :mutants, :warnings, :baseline, :framework, :sources, :static, :metrics, :profile
 
+      class RetryFull < Ripr::Error; end
+
       Selection = Data.define(:candidates, :selected, :changed_tests) do
         def observed
           changed_tests.empty? ? selected : candidates
@@ -29,9 +31,10 @@ module Ripr
       end
       private_constant :Selection
 
-      def initialize(config, paths = [])
+      def initialize(config, paths = [], file_loading: nil)
         @config = config
         @paths = paths
+        @file_loading = file_loading
         @warnings = []
         @mutants = []
         @sources = {}
@@ -103,6 +106,7 @@ module Ripr
 
         prepare_reach_selection(selection)
         prepare_call_graph
+        prepare_test_file_loading
         run_project(selection, &)
       end
 
@@ -157,12 +161,27 @@ module Ripr
       end
 
       def prepare_reach_selection(selection)
-        return unless @config[:reach_map]
+        return unless @config[:reach_map] && @file_loading != :full
 
         require_relative "reach_selection"
         @reach_selection = ReachSelection.new(@config, @sources, selection.observed)
       rescue ReachSelection::Unusable => e
         @warnings << "reach-map fallback: #{e.message}"
+      end
+
+      def prepare_test_file_loading
+        return unless @file_loading == :prune && @reach_selection && !@config[:reach_map_files].empty?
+
+        framework = test_framework
+        files = test_file_paths(framework)
+        allowed = Dir.glob(@config[:reach_map_files]).map { |path| relative(path) }
+        return unless files.intersect?(allowed)
+
+        retained = @reach_selection.load_files(files, framework, allowed:)
+        return if retained == files
+
+        @planned_test_discovery = [framework, files]
+        @retained_test_files = retained
       end
 
       def run_project(selection, &)
@@ -185,6 +204,10 @@ module Ripr
           @profile&.phase("baseline", baseline_started)
           execute_selection(selection, adapter, worker_config, boot_ms, &)
         end
+      rescue StandardError, ScriptError => e
+        raise unless @narrowed_test_files && !@metrics["baseline_reach_map"]
+
+        raise RetryFull, e.message
       end
 
       def execute_selection(selection, adapter, worker_config, boot_ms, &)
@@ -336,16 +359,17 @@ module Ripr
 
       def load_tests
         %w[lib test spec].reverse_each { |directory| $LOAD_PATH.unshift(File.expand_path(directory)) }
-        @framework = @config[:framework]
-        @framework = Dir.glob("spec/**/*_spec.rb").empty? ? "minitest" : "rspec" if @framework == "auto"
-        patterns = @config[:tests] || (@framework == "rspec" ? "spec/**/*_spec.rb" : "test/**/*_test.rb")
-        files = Array(patterns).flat_map { |pattern| Dir.glob(pattern) }.map { |file| relative(file) }.uniq.sort
-        @test_files = files
-        raise ArgumentError, "no test files found" if files.empty?
+        @framework = test_framework
+        @test_files = test_file_paths(@framework)
+        if @planned_test_discovery && @planned_test_discovery != [@framework, @test_files]
+          raise RetryFull, "test file discovery changed during boot"
+        end
+        raise ArgumentError, "no test files found" if @test_files.empty?
 
         require_relative "../integration/#{@framework}"
         klass = @framework == "rspec" ? Integration::RSpec : Integration::Minitest
-        adapter = klass.new(files, seed: @config[:seed])
+        @narrowed_test_files = !@retained_test_files.nil?
+        adapter = klass.new(@retained_test_files || @test_files, seed: @config[:seed])
         capture_load_output do
           if @call_graph
             _, @load_dependencies = @call_graph.trace { adapter.load }
@@ -356,6 +380,18 @@ module Ripr
         raise BaselineFailure, "no tests were discovered" if adapter.tests.empty?
 
         adapter
+      end
+
+      def test_framework
+        framework = @config[:framework]
+        return framework unless framework == "auto"
+
+        Dir.glob("spec/**/*_spec.rb").empty? ? "minitest" : "rspec"
+      end
+
+      def test_file_paths(framework)
+        patterns = @config[:tests] || (framework == "rspec" ? "spec/**/*_spec.rb" : "test/**/*_test.rb")
+        Array(patterns).flat_map { |pattern| Dir.glob(pattern) }.map { |file| relative(file) }.uniq.sort
       end
 
       # rubocop:disable-next Style/GlobalStdStream -- Capture descriptor 1, including direct STDOUT writes.
@@ -405,6 +441,8 @@ module Ripr
         @metrics["baseline_reach_map"] = true
         result
       rescue ReachSelection::Unusable => e
+        raise RetryFull, e.message if @narrowed_test_files
+
         @warnings << "reach-map fallback: #{e.message}"
         nil
       end
