@@ -45,10 +45,10 @@ module Ripr
         files.uniq!
         files.reject! { |path| @config[:exclude].any? { |pattern| File.fnmatch?(pattern, path, File::FNM_PATHNAME) } }
         files.each do |path|
-          source = File.read(path)
-          @sources[path] = source
-          analysis = Core::Analyzer.call(source, path, operators: @config[:operators], arid_callees: @config[:arid_callees],
-                                                       static: @config[:static])
+          analysis = Core::Analyzer.call(
+            File.binread(path), path, operators: @config[:operators], arid_callees: @config[:arid_callees], static: @config[:static]
+          )
+          source = @sources[path] = analysis.fetch(:source)
           instrumented = Core::Instrumenter.call(source, path, analysis.fetch(:sites))
           @codes[File.expand_path(path)] = instrumented.fetch(:code) unless instrumented.fetch(:site_table).empty?
           @table.merge!(instrumented.fetch(:site_table))

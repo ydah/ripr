@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix diff-driven mutation testing for non-ASCII paths and comments in the C locale.
+
 ## 0.2.0 — 2026-11-24
 
 - Run mutation tests in Rails with isolated test databases or load a custom boot file.

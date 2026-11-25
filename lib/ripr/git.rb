@@ -12,7 +12,7 @@ module Ripr
     def changed_lines(ref, paths = nil, include_all_paths: false)
       base = execute("merge-base", "--", ref, "HEAD").strip
       selected = Array(paths)
-      entries = execute("diff", "--relative", "--name-status", "-z", "--find-renames", base, "--", *selected).split("\0")
+      entries = path_entries("diff", "--relative", "--name-status", "-z", "--find-renames", base, "--", *selected)
       changed = {}
       until entries.empty?
         status = entries.shift
@@ -27,7 +27,7 @@ module Ripr
         lines = hunk_lines(diff)
         changed[destination] = lines if include_all_paths || !lines.empty?
       end
-      execute("ls-files", "--others", "--exclude-standard", "-z", "--", *selected).split("\0").each do |path|
+      path_entries("ls-files", "--others", "--exclude-standard", "-z", "--", *selected).each do |path|
         absolute = File.join(@root, path)
         next unless File.file?(absolute)
 
@@ -39,8 +39,12 @@ module Ripr
 
     private
 
+    def path_entries(*arguments)
+      execute(*arguments).split("\0").map! { |entry| entry.force_encoding(Encoding::UTF_8) }
+    end
+
     def execute(*arguments)
-      output, error, status = Open3.capture3("git", "-C", @root, *arguments)
+      output, error, status = Open3.capture3("git", "-C", @root, *arguments, binmode: true)
       raise Error, "git #{arguments.first} failed: #{error.strip}" unless status.success?
 
       output

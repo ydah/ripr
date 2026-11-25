@@ -33,13 +33,14 @@ module Ripr
 
       def call
         parsed = Prism.parse(@source)
+        @source = parsed.source.source
         if parsed.failure?
           @warnings << "#{@path}: #{parsed.errors.map(&:message).join('; ')}"
         else
           parsed.comments.each { |comment| disable(comment) }
           discover(parsed.value, [], false, @include_static ? "root" : nil)
         end
-        { sites: @sites, mutants: @mutants, warnings: @warnings, static: @static }
+        { source: @source, sites: @sites, mutants: @mutants, warnings: @warnings, static: @static }
       end
 
       private

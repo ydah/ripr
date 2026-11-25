@@ -37,11 +37,10 @@ table = {}
 mutants = []
 warnings = []
 code = Dir["lib/**/*.rb"].to_h do |path|
-  source = File.read(path)
-  analysis = Ripr::Core::Analyzer.call(source, path, operators: ["comparison"])
+  analysis = Ripr::Core::Analyzer.call(File.binread(path), path, operators: ["comparison"])
   warnings.concat(analysis.fetch(:warnings))
 
-  instrumented = Ripr::Core::Instrumenter.call(source, path, analysis.fetch(:sites))
+  instrumented = Ripr::Core::Instrumenter.call(analysis.fetch(:source), path, analysis.fetch(:sites))
   warnings.concat(instrumented.fetch(:warnings))
 
   table.merge!(instrumented.fetch(:site_table))

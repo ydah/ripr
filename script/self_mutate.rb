@@ -16,9 +16,8 @@ table = {}
 mutants = []
 Dir.chdir(root) do
   Dir.glob("lib/ripr/core/**/*.rb").each do |path|
-    source = File.read(path)
-    analysis = Ripr::Core::Analyzer.call(source, path)
-    rewritten = Ripr::Core::Instrumenter.call(source, path, analysis.fetch(:sites))
+    analysis = Ripr::Core::Analyzer.call(File.binread(path), path)
+    rewritten = Ripr::Core::Instrumenter.call(analysis.fetch(:source), path, analysis.fetch(:sites))
     codes[File.expand_path(path)] = rewritten.fetch(:code)
     table.merge!(rewritten.fetch(:site_table))
     mutants.concat(analysis.fetch(:mutants))

@@ -4,6 +4,7 @@ require "json"
 require "tmpdir"
 require "fileutils"
 require "open3"
+require "rbconfig"
 %w[git snapshot accept_ledger core/reuse_planner].each do |name|
   file = File.expand_path("../lib/ripr/#{name}.rb", __dir__)
   require file if File.file?(file)
@@ -48,6 +49,49 @@ RSpec.describe "incremental mutation results" do
       changed = Ripr::Git.new(directory).changed_lines("HEAD")
       expect(changed).to eq("space 日本語.rb" => [2], "staged.rb" => [2], "new $(echo unsafe).rb" => [1, 2])
       expect(Ripr::Git.new(directory).changed_lines("HEAD", ["staged.rb"])).to eq("staged.rb" => [2])
+    end
+  end
+
+  it "reads Git paths and diff bodies with non-ASCII bytes in the C locale" do
+    with_repository do |directory|
+      File.binwrite(File.join(directory, "plain.rb"), "# Before\n")
+      File.binwrite(File.join(directory, "日本語.rb"), "# Before\n")
+      commit(directory)
+      File.binwrite(File.join(directory, "plain.rb"), "# 日本語\n")
+      File.binwrite(File.join(directory, "日本語.rb"), "# After\n")
+      File.binwrite(File.join(directory, "新規.rb"), "# New\n")
+
+      script = <<~RUBY
+        abort "expected the C locale" unless Encoding.default_external == Encoding::US_ASCII
+        puts JSON.generate(Ripr::Git.new.changed_lines("HEAD"))
+      RUBY
+      library = File.expand_path("../lib", __dir__)
+      output, error, status = Open3.capture3({ "LANG" => "C", "LC_ALL" => "C" }, RbConfig.ruby,
+                                             "-I", library, "-rjson", "-rripr/git", "-e", script, chdir: directory, binmode: true)
+      expect(status).to be_success, error
+      expect(JSON.parse(output)).to eq("plain.rb" => [1], "日本語.rb" => [1], "新規.rb" => [1])
+    end
+  end
+
+  it "runs mutations in changed Ruby source with non-ASCII comments in the C locale" do
+    with_repository do |directory|
+      fixture = File.expand_path("../test/fixtures/projects/minitest_basic", __dir__)
+      %w[lib test].each { |path| FileUtils.cp_r(File.join(fixture, path), directory) }
+      source = File.join(directory, "lib/利用者.rb")
+      File.rename(File.join(directory, "lib/sample.rb"), source)
+      test = File.join(directory, "test/sample_test.rb")
+      File.binwrite(test, File.binread(test).sub("../lib/sample", "../lib/利用者"))
+      commit(directory)
+      File.binwrite(source, File.binread(source).sub("age >= 18", "age >= 19 # 日本語"))
+
+      executable = File.expand_path("../exe/ripr", __dir__)
+      output, error, status = Open3.capture3({ "LANG" => "C", "LC_ALL" => "C" }, RbConfig.ruby, executable,
+                                             "--since", "HEAD", "--operators", "comparison", "--reporter", "agent",
+                                             chdir: directory, binmode: true)
+      expect(status).to be_success, error
+      expect(JSON.parse(output).fetch("gaps")).to contain_exactly(
+        include("location" => include("file" => "lib/利用者.rb"), "kind" => "not_infected")
+      )
     end
   end
 
