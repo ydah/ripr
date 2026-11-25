@@ -143,6 +143,14 @@ bundle exec ripr --shard 1/2 --no-samples --report-dir .ripr/shard-1
 
 Run the second shard with `--shard 2/2` and its own report directory. Use the same options, clean Git checkout, absolute project path, runtime, and test inputs for every job. Share plans from trusted runs. `--no-samples` keeps sampled application operands out of CI artifacts. Rails requires matching SQLite snapshots and uses one worker per shard. Collect each report directory's `shard.json` for aggregation.
 
+Download the plan and all result fragments in the merge job. Use `--threshold` or `--fail-on-survived` on `merge` to gate the combined result.
+
+```sh
+bundle exec ripr merge .ripr/shard-1/shard.json .ripr/shard-2/shard.json --reporter agent-v2 --reporter json
+```
+
+The [shard matrix workflow](.github/workflows/shard-transport.yml) passes the plan and fragments as artifacts within one run.
+
 When `--include-tests-diff` finds changed tests, sharding selects all candidate mutations so it includes coverage removed by the edit.
 
 For a pull request workflow on GitHub Actions, fetch history for the merge base and install your project's bundle.
