@@ -224,6 +224,77 @@ RSpec.describe "ripr command" do
     end
   end
 
+  it "reuses static plans across fresh boots until a planned source changes" do
+    analyzer = File.expand_path("../lib/ripr/core/analyzer", __dir__)
+    %w[unchanged changed added].each do |scenario|
+      Dir.mktmpdir("ripr-static-plan") do |dir|
+        FileUtils.mkdir_p([File.join(dir, "lib"), File.join(dir, "test")])
+        File.binwrite(File.join(dir, "lib/sample.rb"), "# coding: Windows-1252\nmodule Sample; COUNT = 1; LABEL = '\xE9'; end\n")
+        File.write(File.join(dir, "lib/dependency.rb"), "nil\n")
+        File.write(File.join(dir, "trace.rb"), "require #{analyzer.inspect}\n" + <<~'RUBY')
+          Ripr::Core::Analyzer.singleton_class.prepend(Module.new do
+            def call(source, path, **)
+              File.write("planned.log", "#{Process.pid} #{path}\n", mode: "a")
+              super
+            end
+          end)
+        RUBY
+        File.write(File.join(dir, "boot.rb"), <<~'RUBY')
+          raise "boot was already run" if defined?(STATIC_PLAN_BOOTED)
+          STATIC_PLAN_BOOTED = true
+          unless File.exist?("booted.log")
+            case ENV.fetch("STATIC_PLAN_SCENARIO")
+            when "changed" then File.write("lib/dependency.rb", "false\n")
+            when "added" then File.write("lib/added.rb", "nil\n")
+            end
+          end
+          File.write("booted.log", "#{Process.pid}\n", mode: "a")
+        RUBY
+        File.write(File.join(dir, "test/sample_test.rb"), <<~RUBY)
+          require "minitest/autorun"
+          require_relative "../lib/sample"
+          class SampleTest < Minitest::Test
+            def test_static_value
+              assert_equal [233], Sample::LABEL.bytes
+              assert_equal "Windows-1252", Sample::LABEL.encoding.name
+              assert_equal 1, Sample::COUNT
+            end
+          end
+        RUBY
+
+        env = { "RUBYOPT" => "#{ENV.fetch('RUBYOPT', nil)} -r#{File.join(dir, 'trace.rb')}", "STATIC_PLAN_SCENARIO" => scenario }
+        stdout, stderr, status = command("--full", "--static", "--verify-killed", "--operators", "integer_literal", "--jobs", "2",
+                                         "--boot", "boot.rb", "--reporter", "agent", directory: dir, env: env)
+        expect(status).to be_success, stderr
+        expect(JSON.parse(stdout).fetch("summary")).to include("killed" => 2, "error" => 0), scenario
+        boots = File.readlines(File.join(dir, "booted.log"), chomp: true)
+        expect(boots.uniq.size).to eq(5), scenario
+        plans = File.readlines(File.join(dir, "planned.log"), chomp: true).map { |line| line.split.first }.uniq
+        expect(plans.sort).to eq(scenario == "unchanged" ? [boots.first] : boots.sort), scenario
+      end
+    end
+  end
+
+  it "rejects an invalid acceptance ledger created after planning static mutations" do
+    Dir.mktmpdir("ripr-static-ledger") do |dir|
+      FileUtils.mkdir_p([File.join(dir, "lib"), File.join(dir, "test")])
+      File.write(File.join(dir, "lib/sample.rb"), "module Sample; COUNT = 1; end\n")
+      File.write(File.join(dir, "boot.rb"), "File.write('ripr.accepted.yml', 'invalid')\n")
+      File.write(File.join(dir, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+        class SampleTest < Minitest::Test
+          def test_static_value = assert_equal(1, Sample::COUNT)
+        end
+      RUBY
+
+      stdout, stderr, status = command("--full", "--static", "--operators", "integer_literal", "--boot", "boot.rb",
+                                       "--reporter", "agent", directory: dir)
+      expect(status).to be_success, stderr
+      expect(JSON.parse(stdout).fetch("summary")).to include("killed" => 0, "error" => 2)
+    end
+  end
+
   it "lists the extra operators when the full operator profile is selected" do
     stdout, stderr, status = command("list", "operators", "--operators", "full")
     expect(status.exitstatus).to eq(0), stderr

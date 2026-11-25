@@ -21,6 +21,7 @@ module Ripr
 
       def call(selected, adapter, &progress)
         results, ready = classify(selected)
+        @static_run&.prepare if @config[:static] && ready.count { |mutant| mutant["static"] } > 1
         ready.sort_by! { |mutant| estimated_cost(mutant) }
         timeout = method(:deadline)
         completed = Child.batch(ready, jobs: @config[:jobs], timeout: timeout, on_complete: progress,
@@ -30,6 +31,8 @@ module Ripr
         originals = @config[:verify_killed] ? verify_kills(completed, adapter, timeout) : {}
         diagnoses = diagnose(completed, adapter)
         results.concat(record_results(completed, originals, diagnoses)).sort_by { |mutant| mutant.fetch("full_id") }
+      ensure
+        @static_run&.close
       end
 
       private
