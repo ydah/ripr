@@ -14,6 +14,95 @@ RSpec.describe "ripr command" do
     Open3.capture3(env, RbConfig.ruby, executable, *args, chdir: directory)
   end
 
+  it "restores runtime state, loaders, output, and the caller's environment after a boot failure" do
+    Dir.mktmpdir("ripr-boot-cleanup") do |directory|
+      FileUtils.mkdir_p(File.join(directory, "lib"))
+      File.write(File.join(directory, "lib/sample.rb"), "def adult?(age); age >= 18; end\n")
+      File.write(File.join(directory, "boot.rb"), <<~RUBY)
+        raise "ripr flag missing" unless ENV["RIPR"] == "1"
+        puts "boot diagnostic"
+        STDOUT.puts "descriptor diagnostic"
+        Ripr::R.current_test = "loading"
+        Ripr::R.activate("loading", 1)
+        raise "boot failed"
+      RUBY
+      program = <<~RUBY
+        require "json"
+        require "stringio"
+        require "ripr"
+        require "ripr/config"
+        require "ripr/engine/runner"
+
+        results = [nil, "caller"].map do |previous|
+          previous ? ENV["RIPR"] = previous : ENV.delete("RIPR")
+          stream = StringIO.new
+          $stdout = stream
+          failure = begin
+            config = Ripr::Config.load({ operators: ["comparison"], boot: "boot.rb", jobs: 1 })
+            Ripr::Engine::Runner.new(config).call
+          rescue => error
+            error.message
+          end
+          { "failure" => failure, "environment" => ENV["RIPR"],
+            "loaders" => Ripr::Loader.active_loaders.size, "probe" => Ripr::R.probe,
+            "current_test" => Ripr::R.current_test,
+            "variant" => Ripr::R.bin("loading", 1, 2) { |_, _, variant| variant },
+            "stdout_restored" => $stdout.equal?(stream), "captured" => stream.string }
+        end
+        STDOUT.write(JSON.generate(results))
+      RUBY
+      output, error, status = Open3.capture3(RbConfig.ruby, "-I", File.expand_path("../lib", __dir__),
+                                             "-e", program, chdir: directory)
+
+      expect(status.exitstatus).to eq(0), error
+      expected = { "failure" => "boot failed", "loaders" => 0, "probe" => nil, "current_test" => nil,
+                   "variant" => 0, "stdout_restored" => true, "captured" => "" }
+      expect(JSON.parse(output)).to eq([expected.merge("environment" => nil), expected.merge("environment" => "caller")])
+      expect(error.lines).to eq(["boot diagnostic\n", "descriptor diagnostic\n"] * 2)
+    end
+  end
+
+  it "loads project helpers from lib, test, and spec when tests use ordinary requires" do
+    Dir.mktmpdir("ripr-test-load-path") do |directory|
+      FileUtils.mkdir_p(%w[lib test spec].map { |path| File.join(directory, path) })
+      File.write(File.join(directory, "lib/sample.rb"), "module Sample; def self.adult?(age); age >= 18; end; end\n")
+      File.write(File.join(directory, "test/test_helper.rb"), "require 'minitest/autorun'\nrequire 'sample'\n")
+      File.write(File.join(directory, "spec/fixture_helper.rb"), "FIXTURE_AGE = 18\n")
+      File.write(File.join(directory, "test/sample_test.rb"), <<~RUBY)
+        require "test_helper"
+        require "fixture_helper"
+        class LoadPathTest < Minitest::Test
+          def test_boundary
+            assert Sample.adult?(FIXTURE_AGE)
+          end
+        end
+      RUBY
+
+      output, error, status = command("--full", "--jobs", "1", "--operators", "comparison", "--reporter", "agent", directory: directory)
+      expect(status.exitstatus).to eq(0), error
+      expect(JSON.parse(output).fetch("summary")).to include("killed" => 1, "survived" => 0, "error" => 0)
+    end
+  end
+
+  it "explains when no test files or runnable tests are available" do
+    Dir.mktmpdir("ripr-missing-tests") do |directory|
+      FileUtils.mkdir_p(%w[lib test].map { |path| File.join(directory, path) })
+      File.write(File.join(directory, "lib/sample.rb"), "def adult?(age); age >= 18; end\n")
+      arguments = %w[--full --operators comparison --framework minitest]
+
+      output, error, status = command(*arguments, directory: directory)
+      expect(status.exitstatus).to eq(1)
+      expect(output).to be_empty
+      expect(error).to include("no test files found")
+
+      File.write(File.join(directory, "test/empty_test.rb"), "require 'minitest/autorun'\n")
+      output, error, status = command(*arguments, directory: directory)
+      expect(status.exitstatus).to eq(4)
+      expect(output).to be_empty
+      expect(error).to include("no tests were discovered")
+    end
+  end
+
   it "classifies Minitest gaps and emits clean agent JSON" do
     stdout, stderr, status = command("--reporter", "agent", "--full", "--jobs", "2")
     expect(status.exitstatus).to eq(0), stderr
