@@ -21,7 +21,7 @@ module SelfMutateEngine
     "mutant.rb" => %w[spec/mutation_plan_spec.rb spec/cli_spec.rb],
     "profile.rb" => %w[spec/profile_spec.rb],
     "result_cache.rb" => CACHE_TESTS,
-    "runner.rb" => %w[spec/cli_spec.rb spec/cache_cli_spec.rb],
+    "runner.rb" => %w[spec/cli_spec.rb spec/cache_cli_spec.rb spec/profile_spec.rb],
     "runtime.rb" => %w[spec/runtime_spec.rb spec/instrumenter_spec.rb],
     "scheduler.rb" => %w[spec/kill_order_spec.rb spec/cli_spec.rb spec/propagation_cli_spec.rb],
     "static_run.rb" => CLI_TESTS,
