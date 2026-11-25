@@ -69,7 +69,8 @@ RSpec.describe "ripr reach-map" do
         expect(File).to exist(artifact(directory))
         raw = File.read(artifact(directory))
         map = JSON.parse(raw)
-        expect(map).to include("version" => 1, "base" => git(directory, "rev-parse", "HEAD"), "framework" => "minitest")
+        expect(map).to include("version" => 3, "base" => git(directory, "rev-parse", "HEAD"), "framework" => "minitest",
+                               "opaque_load" => false, "opaque_tests" => [])
         expect(raw).not_to include(directory, "fixture-input")
         expect(map.fetch("tests")).to eq(
           "SampleTest#test_calculate" => { "file" => "test/sample_test.rb", "line" => 4 },

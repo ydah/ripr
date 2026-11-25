@@ -101,6 +101,7 @@ module Ripr
         return selection.selected.map { |mutant| mutant.to_record.merge("status" => "planned") } if @config[:dry_run]
         return [] if selection.observed.empty?
 
+        prepare_reach_selection(selection)
         prepare_call_graph
         run_project(selection, &)
       end
@@ -123,16 +124,17 @@ module Ripr
         base = git.clean_head
         plan
         reach_map = ReachMap.new(@sources, @config)
-        result, tests = with_project(observer: reach_map) do |adapter|
-          reach_map.capture { @rails.prepare_workers(1) } if @rails
+        result, tests, database_inputs = with_project(observer: reach_map) do |adapter|
+          prepare_rails_workers(1, observer: reach_map)
+          database_inputs = reach_map.database_inputs(@rails)
           tests = adapter.tests
           result = run_baseline do
-            baseline = reach_map.capture { run_baseline_tests(adapter, nil) }
+            baseline = reach_map.capture(loading: false) { run_baseline_tests(adapter, nil) }
             baseline.merge("observations" => reach_map.observations)
           end
-          [result, tests]
+          [result, tests, database_inputs]
         end
-        reach_map.write(result, tests, @test_files, @framework, base, git)
+        reach_map.write(result, tests, @test_files, @framework, base, git, database_inputs: database_inputs)
       end
 
       private
@@ -154,15 +156,24 @@ module Ripr
         @call_graph = Core::CallGraph.new(@sources)
       end
 
+      def prepare_reach_selection(selection)
+        return unless @config[:reach_map]
+
+        require_relative "reach_selection"
+        @reach_selection = ReachSelection.new(@config, @sources, selection.observed)
+      rescue ReachSelection::Unusable => e
+        @warnings << "reach-map fallback: #{e.message}"
+      end
+
       def run_project(selection, &)
         probe_table = @table.slice(*selection.observed.map(&:site).uniq)
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        with_project(probe: Probe.new(probe_table, samples: @config[:samples])) do |adapter|
+        with_project(probe: Probe.new(probe_table, samples: @config[:samples]), observer: @reach_selection) do |adapter|
           boot_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000
           load_reached = R.probe.snapshot.fetch("load_reached")
           R.probe = nil
           worker_config = @config.with_worker_limit { WorkerMemory.limit }
-          @rails&.prepare_workers([worker_config[:jobs], selection.observed.length].min)
+          prepare_rails_workers([worker_config[:jobs], selection.observed.length].min, observer: @reach_selection)
           @profile&.phase("boot", started)
           baseline_started = @profile&.now
           method_hashes = @mutants.to_h { |mutant| [mutant.full_id, mutant.method_hash] }
@@ -187,7 +198,7 @@ module Ripr
                                                                             static_run: static_run, profile: @profile)
         results = scheduler.call(selected, adapter, &)
         @profile&.phase("mutation", started)
-        @cache.write(results, @baseline, @metrics)
+        @cache.write(results, @baseline, @metrics) unless @metrics["baseline_reach_map"]
         results
       end
 
@@ -372,24 +383,44 @@ module Ripr
         tests = adapter.tests.map { |test| test.merge("file" => relative(test.fetch("file"))) }
         cache = BaselineCache.new(@cache.previous["baseline"], env_hash: @cache.baseline_env_hash,
                                                                source_hash: @cache.source_hash, test_hashes: @cache.test_hashes,
-                                                               tests: tests, full: @config[:full])
-        fresh = unless cache.test_ids == []
-                  run_baseline do
-                    probe = Probe.new(probe_table, samples: @config[:samples])
-                    R.probe = probe
-                    result = run_baseline_tests(adapter, cache.test_ids)
-                    result.merge("probe" => probe.snapshot)
-                  end
-                end
+                                                               tests: tests, full: @config[:full] || @config[:reach_map])
+        fresh = reach_baseline(adapter, probe_table, load_reached)
+        fresh ||= probe_baseline(adapter, probe_table, cache.test_ids) unless cache.test_ids == []
         fresh&.fetch("tests")&.each_value { |test| test["file"] = relative(test.fetch("file")) }
         @baseline = cache.combine(fresh, load_reached: load_reached)
         @metrics["baseline_reused"] = cache.reused_count.positive?
         @metrics["baseline_tests_run"] = fresh ? fresh.fetch("tests").length : 0
       end
 
-      def run_baseline(&)
+      def reach_baseline(adapter, probe_table, load_reached)
+        return unless @reach_selection
+
+        ids = @reach_selection.test_ids(adapter.tests, framework: @framework, paths: @test_files, rails: @rails,
+                                                       load_reached: load_reached & probe_table.keys)
+        result = probe_baseline(adapter, probe_table, ids, allow_failure: true)
+        unless result["success"] && result.fetch("tests").keys == ids && !result.dig("probe", "load_reached").intersect?(probe_table.keys)
+          raise ReachSelection::Unusable, "the selected baseline failed or had incomplete observations"
+        end
+
+        @metrics["baseline_reach_map"] = true
+        result
+      rescue ReachSelection::Unusable => e
+        @warnings << "reach-map fallback: #{e.message}"
+        nil
+      end
+
+      def probe_baseline(adapter, probe_table, ids, allow_failure: false)
+        run_baseline(allow_failure: allow_failure) do
+          probe = Probe.new(probe_table, samples: @config[:samples])
+          R.probe = probe
+          result = run_baseline_tests(adapter, ids)
+          result.merge("probe" => probe.snapshot)
+        end
+      end
+
+      def run_baseline(allow_failure: false, &)
         result = Child.call(timeout_ms: 60_000 + (@rails&.worker_timeout_ms || 0), &)
-        return result if result["success"]
+        return result if result["success"] || allow_failure
 
         failures = result["failures"] || [result["error"] || result["status"]]
         messages = failures.map { |failure| failure.is_a?(Hash) ? failure["message"] : failure }
@@ -400,6 +431,16 @@ module Ripr
         return adapter.run(test_ids) unless @rails
 
         @rails.with_worker(0) { adapter.run(test_ids) }
+      end
+
+      def prepare_rails_workers(count, observer:)
+        return unless @rails
+
+        if observer
+          observer.capture { @rails.prepare_workers(count) }
+        else
+          @rails.prepare_workers(count)
+        end
       end
 
       def relative(path)
