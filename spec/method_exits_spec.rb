@@ -93,6 +93,9 @@ RSpec.describe Ripr::Engine::MethodExits do
         "Object#ripr_resolver_top_level" => Object.instance_method(:ripr_resolver_top_level)
       )
       expect(targets).to be_frozen
+      expect(described_class.public_subjects(targets)).to eq(
+        "MethodExitsResolveFixture::Nested#within?" => true, "MethodExitsResolveFixture::Nested.positive?" => true
+      )
     end
   end
 
