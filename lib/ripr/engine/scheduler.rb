@@ -23,24 +23,24 @@ module Ripr
         test_order = Hash.new { |order, id| order[id] = [tests.fetch(id).fetch("duration_ms"), id] }
         ready = []
         results = selected.filter_map do |mutant|
-          reach = probe.fetch("reach").fetch(mutant.fetch("site"), [])
-          infect = probe.fetch("infect").fetch(mutant.fetch("id"), [])
-          unknown_reach = probe.fetch("load_reached").include?(mutant.fetch("site"))
-          status = if mutant["accepted"] then "accepted"
-                   elsif mutant["invalid"] then "invalid"
+          reach = probe.fetch("reach").fetch(mutant.site, [])
+          infect = probe.fetch("infect").fetch(mutant.id, [])
+          unknown_reach = probe.fetch("load_reached").include?(mutant.site)
+          status = if mutant.accepted then "accepted"
+                   elsif mutant.invalid then "invalid"
                    elsif reach.empty? && !unknown_reach then "not_reached"
-                   elsif mutant["mode"] == "value" && infect.empty? && !unknown_reach
+                   elsif mutant.mode == "value" && infect.empty? && !unknown_reach
                      "not_infected"
                    end
-          data = mutant.merge("load_reached" => unknown_reach,
-                              "observed" => probe.fetch("samples").fetch(mutant.fetch("site"), []),
-                              "covering_tests" => reach.filter_map { |id| @baseline.fetch("tests")[id]&.merge("id" => id) })
-          cached = @cache.result_for(mutant, probe: probe) unless %w[accepted invalid].include?(status)
+          data = mutant.to_record.merge("load_reached" => unknown_reach,
+                                        "observed" => probe.fetch("samples").fetch(mutant.site, []),
+                                        "covering_tests" => reach.filter_map { |id| tests[id]&.merge("id" => id) })
+          cached = @cache.result_for(data, probe: probe) unless %w[accepted invalid].include?(status)
           verify = %w[not_reached not_infected].include?(status) &&
                    (!@config[:only].empty? || (@config[:verify_not_infected] && status == "not_infected"))
           if cached
             @metrics["reused"] += 1
-            cached.merge(data)
+            cached
           elsif status && !verify
             @profile&.skip_mutation(status)
             data.merge("status" => status)
@@ -48,11 +48,11 @@ module Ripr
             ids = if unknown_reach
                     @baseline.fetch("tests").keys
                   else
-                    (mutant["mode"] == "value" ? infect : reach)
+                    (mutant.mode == "value" ? infect : reach)
                   end
             ids = reach if ids.empty?
             ids = @baseline.fetch("tests").keys if ids.empty?
-            killer = @cache.previous_killer(mutant, ids, tests)
+            killer = @cache.previous_killer(data, ids, tests)
             ids = ids.sort_by { |id| test_order[id] }
             ids.unshift(ids.delete(killer)) if killer && killer != ids.first
             ready << data.merge("test_ids" => ids, "verification_status" => verify ? status : nil)

@@ -8,6 +8,7 @@ require_relative "../loader"
 require_relative "../git"
 require_relative "../accept_ledger"
 require_relative "child"
+require_relative "mutant"
 require_relative "baseline_cache"
 require_relative "result_cache"
 require_relative "scheduler"
@@ -60,24 +61,28 @@ module Ripr
           @profile&.phase("instrument", instrument_started)
           @codes[File.expand_path(path)] = instrumented.fetch(:code) unless instrumented.fetch(:site_table).empty?
           @table.merge!(instrumented.fetch(:site_table))
-          analysis.fetch(:mutants).each do |mutant|
-            mutant[:invalid] = true if instrumented.fetch(:invalid).include?(mutant[:id])
+          unsupported = instrumented.fetch(:invalid)
+          planned = analysis.fetch(:mutants).map do |mutant|
+            invalid = unsupported.include?(mutant.fetch(:id)) || mutant[:invalid]
+            Mutant.from_analysis(mutant, invalid: invalid)
           end
-          @mutants.concat(analysis.fetch(:mutants).map { |mutant| stringify(mutant) })
+          @mutants.concat(planned)
           @warnings.concat(analysis.fetch(:warnings) + instrumented.fetch(:warnings))
           @static += analysis.fetch(:static)
         end
         acceptances = AcceptLedger.new.read.to_h { |entry| [entry.fetch("full_id"), entry] }
-        @mutants.each do |mutant|
-          entry = acceptances[mutant.fetch("full_id")]
-          next unless entry
+        @mutants.map! do |mutant|
+          entry = acceptances[mutant.full_id]
+          next mutant unless entry
 
-          if entry["method_hash"] == mutant["method_hash"]
-            mutant["accepted"] ||= entry.fetch("reason")
+          if entry["method_hash"] == mutant.method_hash
+            mutant.accepted ? mutant : mutant.with(accepted: entry.fetch("reason").freeze)
           else
-            @warnings << "stale acceptance #{mutant.fetch('id')}: method changed; review the reason again"
+            @warnings << "stale acceptance #{mutant.id}: method changed; review the reason again"
+            mutant
           end
         end
+        @mutants.freeze
         @planned = true
         @profile&.phase("plan", started)
         @mutants
@@ -92,14 +97,14 @@ module Ripr
         test_changes = changed_test_files(changes)
         observed = test_changes.empty? ? selected : candidates
         @profile&.phase("plan", started)
-        return selected.map { |m| m.merge("status" => "planned") } if @config[:dry_run]
+        return selected.map { |mutant| mutant.to_record.merge("status" => "planned") } if @config[:dry_run]
         return [] if observed.empty?
 
         if @config[:call_graph_reuse] && !(@config[:boot] || @config[:rails] || @config[:static] || @config[:verify_killed])
           require_relative "../core/call_graph"
           @call_graph = Core::CallGraph.new(@sources)
         end
-        probe_table = @table.slice(*observed.map { |mutant| mutant.fetch("site") }.uniq)
+        probe_table = @table.slice(*observed.map(&:site).uniq)
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         with_project(probe: Probe.new(probe_table, samples: @config[:samples])) do |adapter|
           boot_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000
@@ -109,7 +114,8 @@ module Ripr
           @rails&.prepare_workers([worker_config[:jobs], observed.length].min)
           @profile&.phase("boot", started)
           baseline_started = @profile&.now
-          @cache = ResultCache.new(@config, sources: @sources, test_files: @test_files, framework: @framework, mutants: @mutants,
+          method_hashes = @mutants.to_h { |mutant| [mutant.full_id, mutant.method_hash] }
+          @cache = ResultCache.new(@config, sources: @sources, test_files: @test_files, framework: @framework, method_hashes:,
                                             test_ids: adapter.tests.map { |test| test.fetch("id") }, probe_sites: probe_table.keys,
                                             graph: @call_graph, load_dependencies: @load_dependencies)
           Process.warmup
@@ -130,7 +136,7 @@ module Ripr
 
       def run_static(full_id, test_ids)
         plan
-        mutant = @mutants.find { |entry| entry["full_id"] == full_id && entry["static"] } if full_id
+        mutant = @mutants.find { |entry| entry.full_id == full_id && entry.static } if full_id
         raise ArgumentError, "static mutation changed before execution: #{full_id}" if full_id && !mutant
 
         with_project(active: mutant) { |adapter| capture_load_output { adapter.run(test_ids, fail_fast: true) } }
@@ -151,8 +157,8 @@ module Ripr
         R.configure(@table, samples: @config[:samples])
         R.probe = probe
         if active
-          site = active.fetch("site")
-          R.activate(site, @table.fetch(site).index(active.fetch("id")) + 1)
+          site = active.site
+          R.activate(site, @table.fetch(site).index(active.id) + 1)
         end
         if @rails
           capture_load_output { @rails.boot }
@@ -195,21 +201,21 @@ module Ripr
       def select_ids(mutants)
         return mutants if @config[:only].empty?
 
-        missing = @config[:only] - mutants.flat_map { |m| [m["id"], m["full_id"]] }
+        missing = @config[:only] - mutants.flat_map { |mutant| [mutant.id, mutant.full_id] }
         raise ArgumentError, "unknown mutant ids: #{missing.join(', ')}" unless missing.empty?
 
-        mutants.select { |m| @config[:only].include?(m["id"]) || @config[:only].include?(m["full_id"]) }
+        mutants.select { |mutant| @config[:only].include?(mutant.id) || @config[:only].include?(mutant.full_id) }
       end
 
       def select_source_mutants(mutants, changed)
         mutants.select do |mutant|
-          location = mutant.fetch("location")
+          location = mutant.location
           range = if @config[:scope] == "method"
-                    mutant.fetch("method_start")..mutant.fetch("method_end")
+                    mutant.method_start..mutant.method_end
                   else
-                    location.fetch("line")..location.fetch("end_line")
+                    location.line..location.end_line
                   end
-          changed.fetch(location.fetch("file"), []).any? { |line| range.cover?(line) }
+          changed.fetch(location.file, []).any? { |line| range.cover?(line) }
         end
       end
 
@@ -235,7 +241,7 @@ module Ripr
         previous_probe = previous["probe"] if previous.is_a?(Hash)
         previous_reach = previous_probe["reach"] if previous_probe.is_a?(Hash)
         mutants.select do |mutant|
-          site = mutant.fetch("site")
+          site = mutant.site
           old_ids = previous_reach[site] if previous_reach.is_a?(Hash)
           probe.fetch("load_reached").include?(site) || probe.fetch("reach").fetch(site, []).intersect?(tests) ||
             (previous_tests && old_ids.is_a?(Array) && old_ids.intersect?(previous_tests))
@@ -247,20 +253,20 @@ module Ripr
       end
 
       def check_types(mutants)
-        return mutants if mutants.all? { |mutant| mutant["accepted"] || mutant["invalid"] }
+        return mutants if mutants.all? { |mutant| mutant.accepted || mutant.invalid }
 
         require_relative "type_checker"
         TypeChecker.open(@config[:typecheck]) do |checker|
           mutants.map do |mutant|
-            next mutant if mutant["accepted"] || mutant["invalid"]
+            next mutant if mutant.accepted || mutant.invalid
 
-            path = mutant.fetch("location").fetch("file")
-            code = Core::Instrumenter.mutate(@sources.fetch(path), mutant.transform_keys(&:to_sym))
+            path = mutant.location.file
+            code = Core::Instrumenter.mutate(@sources.fetch(path), mutant.to_h)
             diagnostic = checker.check(path, code)
             next mutant unless diagnostic
 
-            @warnings << "typecheck excluded #{mutant.fetch('id')}: #{diagnostic}"
-            mutant.merge("invalid" => true, "invalid_reason" => diagnostic)
+            @warnings << "typecheck excluded #{mutant.id}: #{diagnostic}"
+            mutant.with(invalid: true, invalid_reason: diagnostic.freeze)
           end
         end
       end
@@ -340,14 +346,6 @@ module Ripr
 
       def relative(path)
         Pathname.new(File.expand_path(path)).relative_path_from(Pathname.new(Dir.pwd)).to_s
-      end
-
-      def stringify(value)
-        case value
-        when Hash then value.to_h { |key, child| [key.to_s, stringify(child)] }
-        when Array then value.map { |child| stringify(child) }
-        else value
-        end
       end
     end
   end

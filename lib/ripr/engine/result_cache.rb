@@ -11,9 +11,9 @@ module Ripr
     class ResultCache
       attr_reader :baseline_env_hash, :source_hash, :test_hashes, :previous, :graph
 
-      def initialize(config, sources:, test_files:, framework:, mutants:, test_ids:, probe_sites:, graph: nil, load_dependencies: nil)
+      def initialize(config, sources:, test_files:, framework:, method_hashes:, test_ids:, probe_sites:, graph: nil, load_dependencies: nil)
         @config = config
-        @mutants = mutants
+        @method_hashes = method_hashes
         @snapshot = Snapshot.new
         @previous = config[:full] || config[:boot] || config[:rails] ? {} : @snapshot.read
         @source_hash = digest(sources.sort.to_h.transform_values { |source| Digest::SHA256.hexdigest(source) })
@@ -66,10 +66,9 @@ module Ripr
       end
 
       def write(results, baseline, metrics)
-        current = @mutants.to_h { |mutant| [mutant.fetch("full_id"), mutant] }
         records = @previous.fetch("mutants", {}).select do |id, record|
-          mutant = current[id]
-          mutant && valid_record?(record) && record["env_hash"] == @env_hash && record["method_hash"] == mutant["method_hash"]
+          method_hash = @method_hashes[id]
+          method_hash && valid_record?(record) && record["env_hash"] == @env_hash && record["method_hash"] == method_hash
         end
         results.each do |result|
           files = result.fetch("covering_tests", []).map { |test| test.fetch("file") }

@@ -459,7 +459,7 @@ RSpec.describe "incremental ripr commands" do
         config = { full: false, only: [], operators: ["comparison"], arid_callees: [], tests: nil, samples: true,
                    seed: 0, timeout: {}, jobs: 1, verify_not_infected: false }
         cache = Ripr::Engine::ResultCache.new(config, sources: { "lib/a.rb" => "\xFF".b }, test_files: [], test_ids: [], probe_sites: [],
-                                                      framework: "minitest", mutants: [])
+                                                      framework: "minitest", method_hashes: {})
         expect(cache.source_hash).to match(/\A[0-9a-f]{64}\z/)
       end
     end
@@ -471,7 +471,7 @@ RSpec.describe "incremental ripr commands" do
         config = Ripr::Config.load({ operators: ["comparison"] })
         mutant = { "id" => "sample", "full_id" => "sample::comparison", "method_hash" => "method" }
         arguments = { sources: { "lib/sample.rb" => File.read("lib/sample.rb") }, test_files: ["test/sample_test.rb"],
-                      framework: "minitest", mutants: [mutant], probe_sites: [] }
+                      framework: "minitest", method_hashes: { "sample::comparison" => "method" }, probe_sites: [] }
         cache = Ripr::Engine::ResultCache.new(config, **arguments, test_ids: ["SampleTest#old"])
         cache.write([mutant.merge("status" => "not_infected", "observed" => [], "covering_tests" => [])], {}, {})
         unchanged = Ripr::Engine::ResultCache.new(config, **arguments, test_ids: ["SampleTest#old"])
@@ -524,7 +524,8 @@ RSpec.describe "incremental ripr commands" do
           config = Ripr::Config.load({ operators: ["comparison"] })
           mutant = { "id" => "sample", "full_id" => "sample::comparison", "method_hash" => "method" }
           arguments = { sources: { "lib/sample.rb" => File.read("lib/sample.rb") }, test_files: ["test/sample_test.rb"],
-                        framework: "minitest", mutants: [mutant], test_ids: ["SampleTest#test"], probe_sites: [] }
+                        framework: "minitest", method_hashes: { "sample::comparison" => "method" },
+                        test_ids: ["SampleTest#test"], probe_sites: [] }
           cache = Ripr::Engine::ResultCache.new(config, **arguments)
           cache.write([mutant.merge("status" => "not_infected", "observed" => [], "covering_tests" => [])], {}, {})
           expect(Ripr::Engine::ResultCache.new(config, **arguments).result_for(mutant)).not_to be_nil

@@ -110,7 +110,7 @@ module Ripr
       runner = Engine::Runner.new(config, @arguments)
       runner.plan
       results = if command == "list"
-                  runner.mutants.map { |m| m.merge("status" => "planned") }
+                  runner.mutants.map { |mutant| mutant.to_record.merge("status" => "planned") }
                 else
                   runner.call do |done, total|
                     @stderr.print "\rripr: mutation workers #{done}/#{total}#{"\n" if done == total}" if @stderr.tty?
@@ -163,13 +163,11 @@ module Ripr
 
       runner = Engine::Runner.new(config)
       runner.plan
-      mutant = runner.mutants.find { |entry| entry["full_id"] == record["full_id"] }
-      unless mutant && mutant["method_hash"] == record["method_hash"]
-        raise ArgumentError, "mutant source changed; rerun ripr before accepting"
-      end
+      mutant = runner.mutants.find { |entry| entry.full_id == record["full_id"] }
+      raise ArgumentError, "mutant source changed; rerun ripr before accepting" unless mutant && mutant.method_hash == record["method_hash"]
 
-      AcceptLedger.new.accept(mutant, reason: @reason)
-      @stdout.puts "Accepted #{mutant.fetch('id')}"
+      AcceptLedger.new.accept(mutant.to_record, reason: @reason)
+      @stdout.puts "Accepted #{mutant.id}"
       0
     end
   end

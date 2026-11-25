@@ -17,6 +17,7 @@ module SelfMutateEngine
   SUITES = {
     "baseline_cache.rb" => CACHE_TESTS,
     "child.rb" => %w[spec/engine_spec.rb],
+    "mutant.rb" => %w[spec/mutation_plan_spec.rb spec/cli_spec.rb],
     "profile.rb" => %w[spec/profile_spec.rb],
     "result_cache.rb" => CACHE_TESTS,
     "runner.rb" => %w[spec/cli_spec.rb spec/cache_cli_spec.rb],
