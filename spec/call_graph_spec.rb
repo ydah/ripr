@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "ripr/core/call_graph"
+require "erb"
 require "stringio"
 require "tmpdir"
 
@@ -50,6 +51,36 @@ RSpec.describe Ripr::Core::CallGraph do
     invalid = graph("def invalid;")
     expect(invalid.structure_hash).to be_nil
     expect(invalid.signature([])).to be_nil
+    expect(invalid.trace { :original_result }).to eq([:original_result, nil])
+  end
+
+  it "invalidates changes to the first byte or to a definition's column" do
+    code = "1.to_s\ndef self.first = 2; def self.second = 3\n"
+    current = graph(code)
+    expect(graph(code.sub("1.to_s", "9.to_s")).structure_hash).not_to eq(current.structure_hash)
+    expect(graph(code.sub("first = 2", "first = 200")).structure_hash).not_to eq(current.structure_hash)
+  end
+
+  it "records dependencies when Ruby loads a configured source through its real path" do
+    code = "class Sample\n#{source}end\n"
+    Dir.mktmpdir do |directory|
+      directory = File.realpath(directory)
+      real_path = File.join(directory, "example.rb")
+      link_path = File.join(directory, "linked.rb")
+      File.write(real_path, code)
+      File.symlink(real_path, link_path)
+      current = described_class.new(link_path => code)
+      scope = Module.new
+
+      result, dependencies = current.trace do
+        load(real_path, scope)
+        scope.const_get(:Sample, false).root(3)
+      end
+      expect(result).to eq(5)
+      expect(dependencies.size).to eq(2)
+      changed = described_class.new(link_path => code.sub("value + 2", "value + 5"))
+      expect(changed.signature(dependencies)).not_to eq(current.signature(dependencies))
+    end
   end
 
   it "tracks a method body reached only through a block" do
@@ -67,19 +98,58 @@ RSpec.describe Ripr::Core::CallGraph do
     expect(graph(code.sub("7", "8")).signature(dependencies)).not_to eq(old_graph.signature(dependencies))
   end
 
-  it "refuses evidence from code inspection and invalid dependency records" do
+  it "refuses evidence from instruction sequence lookup and disassembly" do
     old_graph = graph(source)
     scope = Module.new.tap { |mod| mod.module_eval(source, path) }
-    _, dependencies = old_graph.trace { RubyVM::InstructionSequence.of(scope.method(:leaf)).disasm }
-    expect(dependencies).to be_nil
-    expect(old_graph.signature(nil)).to be_nil
-    expect(old_graph.signature(["invented"])).to be_nil
+    method = scope.method(:leaf)
+    sequence, lookup_dependencies = old_graph.trace { RubyVM::InstructionSequence.of(method) }
+    disassembly, disassembly_dependencies = old_graph.trace { sequence.disasm }
+    expect(disassembly).to include("leaf")
+    expect(lookup_dependencies).to be_nil
+    expect(disassembly_dependencies).to be_nil
+  end
+
+  it "refuses invalid dependency records" do
+    current = graph(source)
+    expect(current.signature(nil)).to be_nil
+    expect(current.signature(["invented"])).to be_nil
   end
 
   it "refuses AST inspection without a method call" do
     current = graph(source)
     _, dependencies = current.trace { RubyVM::AbstractSyntaxTree.parse_file(__FILE__) }
     expect(dependencies).to be_nil
+  end
+
+  it "refuses evidence when Prism parses a file" do
+    result, dependencies = graph(source).trace { Prism.parse_file(__FILE__).success? }
+    expect(result).to be(true)
+    expect(dependencies).to be_nil
+  end
+
+  it "refuses evidence when work is delegated to another process" do
+    result, dependencies = graph(source).trace { system("true") }
+    expect(result).to be(true)
+    expect(dependencies).to be_nil
+  end
+
+  it "refuses evidence when traced code enables its own trace" do
+    lines = []
+    nested = TracePoint.new(:line) { |event| lines << event.lineno }
+    expect(graph(source).trace { nested.enable { :value } }).to eq([:value, nil])
+    expect(lines).not_to be_empty
+  end
+
+  it "allows ordinary methods with names shared by reflection APIs" do
+    object = Object.new
+    def object.enable = 1
+    def object.of = 2
+    def object.to_a = [3]
+    def object.parse_file = 4
+
+    result, dependencies = graph(source).trace { [object.enable, object.of, object.to_a, object.parse_file] }
+    expect(result).to eq([1, 2, [3], 4])
+    expect(dependencies).to eq([])
   end
 
   it "refuses to reuse a result when native IO observes source bytes" do
@@ -96,11 +166,11 @@ RSpec.describe Ripr::Core::CallGraph do
     end
   end
 
-  it "permits RSpec to read option files and still rejects any file read by their ERB code" do
+  it "permits RSpec to render option files and rejects external reads from their templates" do
     current = graph(source)
     Dir.mktmpdir do |directory|
       Dir.chdir(directory) do
-        File.write(".rspec", "--color\n")
+        File.write(".rspec", '<%= "--color" %>')
         options, dependencies = current.trace { RSpec::Core::ConfigurationOptions.new([]).options }
         expect(options.fetch(:color)).to be(true)
         expect(dependencies).to eq([])
@@ -114,9 +184,36 @@ RSpec.describe Ripr::Core::CallGraph do
     end
   end
 
-  it "refuses evidence from evaluation in user code" do
-    _, dependencies = graph(source).trace { Module.new.module_eval("1 + 1", __FILE__, __LINE__) }
-    expect(dependencies).to be_nil
+  it "refuses evidence from evaluation in user code and ordinary ERB templates" do
+    current = graph(source)
+    expect(current.trace { Module.new.module_eval("1 + 1", __FILE__, __LINE__) }).to eq([2, nil])
+    expect(current.trace { ERB.new("<%= 2 + 3 %>").result }).to eq(["5", nil])
+  end
+
+  it "permits RSpec mocks to define their stubs" do
+    object = Object.new
+    def object.label = "original"
+
+    result, dependencies = graph(source).trace do
+      allow(object).to receive(:label).and_return("stubbed")
+      object.label
+    end
+    expect(result).to eq("stubbed")
+    expect(dependencies).to eq([])
+  end
+
+  it "permits empty methods and fingerprints changes to methods defined on arbitrary receivers" do
+    code = <<~RUBY
+      def self.empty; end
+      target = Object.new
+      def target.label = 1
+    RUBY
+    current = graph(code)
+    scope = Module.new.tap { |mod| mod.module_eval(code, path) }
+
+    expect(current.structure_hash).not_to be_nil
+    expect(current.trace { scope.empty }).to eq([nil, []])
+    expect(graph(code.sub("target.label = 1", "target.label = 2")).structure_hash).not_to eq(current.structure_hash)
   end
 
   it "fingerprints bodies that can define methods or execute a detached heredoc conservatively" do

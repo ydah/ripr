@@ -128,4 +128,8 @@ jobs:
           mkdir -p .ripr
           bundle exec ruby script/self_mutate.rb --check
           bundle exec ruby script/self_mutate.rb > .ripr/self-application.json
-          bundle exec ruby -rjson -e 'score = JSON.parse(File.read(".ripr/self-application.json")).fetch("summary").fetch("score"); puts "Core mutation score: #{score}%"; puts "::warning::Core mutation score below 80%: #{score}%" if score < 80'
+          bundle exec ruby -rjson -e '
+            score = JSON.parse(File.read(".ripr/self-application.json")).fetch("summary").fetch("score")
+            puts "Core mutation score: #{score}%"
+            abort "Core mutation score is below the required 90%" if score < 90
+          '
