@@ -58,7 +58,7 @@ module Ripr
           original = source.read
           write_source(source, mutated_source)
           result = run
-          raise Error, "#{@backend} type checker replaced #{path}" unless File.identical?(target, source)
+          raise Error, "#{@backend} type checker replaced #{path}" if File.symlink?(target) || !File.identical?(target, source)
 
           result
         ensure
