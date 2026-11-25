@@ -1,0 +1,40 @@
+{
+  "file": "lib/fulfillment.rb",
+  "cases": [
+    {
+      "original": "weight >= 2",
+      "replacement": "weight > 2",
+      "status": "not_reached",
+      "stage": "unreached",
+      "reason": "The fixture never calls customs_form?. At 2 kg the original requires the form and the mutant does not."
+    },
+    {
+      "original": "subtotal >= 50",
+      "replacement": "subtotal > 50",
+      "status": "not_infected",
+      "stage": "unchanged_expression",
+      "reason": "Both comparisons are true at 75 and false at 20. They differ at 50."
+    },
+    {
+      "original": "minutes <= 15",
+      "replacement": "minutes < 15",
+      "status": "not_infected",
+      "stage": "unchanged_expression",
+      "reason": "Both comparisons are true at 10 and false at 16. They differ at 15."
+    },
+    {
+      "original": "weight >= 20",
+      "replacement": "weight > 20",
+      "status": "not_detected",
+      "stage": "propagated_unrevealed",
+      "reason": "At 20 kg the oversize field changes from true to false in the returned quote. The test asserts only the currency field."
+    },
+    {
+      "original": "value >= 100",
+      "replacement": "value > 100",
+      "status": "killed",
+      "stage": "revealed",
+      "reason": "At 100 the mutant returns false and the signature assertion expects true."
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "file": "lib/billing.rb",
+  "cases": [
+    {
+      "original": "cents + fee",
+      "replacement": "cents - fee",
+      "status": "not_infected",
+      "stage": "unchanged_expression",
+      "reason": "Adding and subtracting a zero fee gives the same amount. A nonzero fee distinguishes the expressions."
+    },
+    {
+      "original": "cents - credit",
+      "replacement": "cents + credit",
+      "status": "not_infected",
+      "stage": "unchanged_expression",
+      "reason": "Adding and subtracting zero credit gives the same amount. A nonzero credit distinguishes the expressions."
+    },
+    {
+      "original": "quantity >= 5",
+      "replacement": "quantity > 5",
+      "status": "not_detected",
+      "stage": "equivalent",
+      "reason": "At 5 the comparison changes which array is selected. Either array has length two, so for every integer quantity the public result is two."
+    },
+    {
+      "original": "cents + tax",
+      "replacement": "cents - tax",
+      "status": "killed",
+      "stage": "revealed",
+      "reason": "The original adds 20 to 100. The mutant produces 80 and the assertion expects 120."
+    }
+  ]
+}
