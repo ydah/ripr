@@ -5,6 +5,7 @@
 - Fix diff-driven mutation testing for non-ASCII paths and comments in the C locale.
 - Write phase timings, test counts, and cache hit rates with `--profile`.
 - Prioritize previously killing tests within the test framework's ordering rules.
+- Suggest operands that distinguish a comparison or arithmetic mutation from the original expression.
 
 ## 0.2.0 — 2026-11-24
 

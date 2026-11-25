@@ -65,11 +65,13 @@ ripr observes an unmodified test run, then runs relevant tests against each muta
 | `not_infected` | Tests ran the expression, and the mutation left its value unchanged for the observed inputs. | Add a boundary case or another input. |
 | `not_detected` | The mutation was exercised and tests still passed. | Check whether the changed value reaches an assertion. |
 
-Ages 20 and 10 produce the same results for `age >= 18` and `age > 18`. The text report shows the inputs that reached the comparison.
+Ages 20 and 10 produce the same results for `age >= 18` and `age > 18`. The text report shows the observed operands and suggests a pair that changes the result.
 
 ```text
 not infected lib/sample.rb:5:5 "age >= 18" → "age > 18" id=9c572228cf
   observed: [[20,18],[10,18]]
+  suggested inputs: [[18,18]]
+  No sampled pair had equal operands.
 ```
 
 Add age 18 to exercise the boundary.

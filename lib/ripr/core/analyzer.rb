@@ -220,6 +220,10 @@ module Ripr
                                location: { file: @path, line: node.location.start_line,
                                            column: node.location.start_column + 1, end_line: node.location.end_line,
                                            end_column: node.location.end_column + 1 })
+        if %w[comparison arithmetic].include?(operator)
+          mutant[:original_operator] = node.name.to_s
+          mutant[:fixed_operands] = [node.receiver, node.arguments.arguments.first].map { |operand| fixed_operand?(operand) }
+        end
         mutant[:invalid] = true if Prism.parse(Instrumenter.mutate(@source, mutant)).failure?
         @mutants << mutant
         site = @sites.find { |entry| entry[:key] == key }
@@ -228,6 +232,11 @@ module Ripr
           @sites << site
         end
         site[:variants] << mutant
+      end
+
+      def fixed_operand?(node)
+        node = node.body&.body&.last while node.is_a?(Prism::ParenthesesNode)
+        node.nil? || node.static_literal? || node.is_a?(Prism::StringNode) || node.is_a?(Prism::SourceFileNode)
       end
     end
   end

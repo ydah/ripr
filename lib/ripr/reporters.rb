@@ -6,6 +6,7 @@ require "fileutils"
 require "pathname"
 require "shellwords"
 require_relative "core/classifier"
+require_relative "core/input_suggestions"
 require_relative "core/operators"
 
 module Ripr
@@ -32,6 +33,8 @@ module Ripr
         hint = HINTS.fetch(status)
         observed = mutant.fetch("observed", [])
         hint += " Observed operands: #{JSON.generate(observed)}." if status == "not_infected" && !observed.empty?
+        suggestion = Core::InputSuggestions.for(mutant)
+        hint += " #{suggestion_message(suggestion)}" if suggestion
         hint += " #{load_note(mutant)}" if mutant["load_reached"]
         flags = ""
         flags += " --rails" if config && config[:rails]
@@ -39,10 +42,12 @@ module Ripr
         flags += " --static" if mutant["static"]
         operator = mutant.fetch("operator")
         flags += " --operators #{operator}" if Core::Operators::EXTRA_NAMES.include?(operator)
-        mutant.slice("id", "full_id", "location", "subject", "operator", "original", "mutated", "observed", "covering_tests",
-                     "load_reached")
-              .merge("kind" => status, "action" => ACTIONS.fetch(status), "hint" => hint,
-                     "rerun" => "ripr --only #{id}#{flags}", "accept" => "ripr accept #{id}#{flags} --reason \"...\"")
+        gap = mutant.slice("id", "full_id", "location", "subject", "operator", "original", "mutated", "observed", "covering_tests",
+                           "load_reached")
+                    .merge("kind" => status, "action" => ACTIONS.fetch(status), "hint" => hint,
+                           "rerun" => "ripr --only #{id}#{flags}", "accept" => "ripr accept #{id}#{flags} --reason \"...\"")
+        gap["suggested_inputs"] = suggestion.fetch(:inputs) if suggestion
+        gap
       end
       { "schema" => "ripr.agent/v1", "run" => run, "summary" => summary, "gaps" => gaps }
     end
@@ -52,6 +57,8 @@ module Ripr
         mutants = results.select { |m| m.fetch("location").fetch("file") == path }.map do |mutant|
           location = mutant.fetch("location")
           reason = mutant["accepted"] || mutant["invalid_reason"] || mutant["error"] || mutant.fetch("status")
+          suggestion = Core::InputSuggestions.for(mutant)
+          reason += ". #{suggestion_message(suggestion)}" if suggestion
           reason += ". #{load_note(mutant)}" if mutant["load_reached"]
           { "id" => mutant.fetch("id"), "mutatorName" => mutant.fetch("operator"), "replacement" => mutant.fetch("mutated"),
             "status" => MTE_STATUSES.fetch(mutant.fetch("status")), "statusReason" => reason,
@@ -81,6 +88,10 @@ module Ripr
             stdout.puts "#{mutant['status'].tr('_', ' ')} #{location['file']}:#{location['line']}:#{location['column']} " \
                         "#{mutant['original'].inspect} → #{mutant['mutated'].inspect} id=#{mutant['id']}"
             stdout.puts "  observed: #{JSON.generate(mutant['observed'])}" unless mutant.fetch("observed", []).empty?
+            if (suggestion = Core::InputSuggestions.for(mutant))
+              stdout.puts "  suggested inputs: #{JSON.generate(suggestion.fetch(:inputs))}"
+              stdout.puts "  #{suggestion[:reason]}" if suggestion[:reason]
+            end
             stdout.puts "  #{load_note(mutant)}" if mutant["load_reached"]
           end
         when "agent"
@@ -119,6 +130,12 @@ module Ripr
     def self.load_note(mutant)
       mutant["static"] ? STATIC_NOTE : LOAD_NOTE
     end
+
+    def self.suggestion_message(suggestion)
+      ["Try operand pairs #{JSON.generate(suggestion.fetch(:inputs))}.", suggestion[:reason]].compact.join(" ")
+    end
+
+    private_class_method :suggestion_message
 
     def self.html(report)
       data = JSON.generate(report).gsub("<") { "\\u003c" }
