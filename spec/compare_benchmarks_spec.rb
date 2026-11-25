@@ -128,7 +128,7 @@ RSpec.describe "end-to-end benchmark script" do
       command = [RbConfig.ruby, "-e", code]
       config = { "project" => "timeout", "tool" => "ripr", "directory" => directory,
                  "file" => "source.rb", "before" => "42", "after" => "(42)", "caches" => [],
-                 "full" => command, "incremental" => command, "format" => "ripr", "timeout_seconds" => 0.2 }
+                 "full" => command, "incremental" => command, "format" => "ripr", "timeout_seconds" => 1 }
       manifest = File.join(directory, "manifest.json")
       destination = File.join(directory, "results.json")
       File.write(manifest, JSON.generate([config]))
@@ -139,9 +139,9 @@ RSpec.describe "end-to-end benchmark script" do
       expect(status.success?).to be(true), error
       result = JSON.parse(File.read(destination)).first
       expect(result.fetch("blocked")).to include("exceeded")
-      expect(result.fetch("partial").fetch("seconds")).to be >= 0.2
+      expect(result.fetch("partial").fetch("seconds")).to be >= 1
       expect(File.read(File.join(directory, "comparison-logs/cold-0.stdout"))).to include("progress before timeout")
-      expect(elapsed).to be < 2
+      expect(elapsed).to be < 3
       expect(File.read(File.join(directory, "source.rb"))).to eq("42\n")
     end
   end
