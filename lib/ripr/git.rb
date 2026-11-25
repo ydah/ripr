@@ -9,10 +9,10 @@ module Ripr
       @root = File.expand_path(root)
     end
 
-    def clean_head
+    def clean_head(operation: "reach-map")
       cache_entry = "?? #{project_prefix}.ripr/".b
       status = execute("status", "--porcelain=v1", "-z", "--untracked-files=all").split("\0")
-      raise ArgumentError, "reach-map requires a clean Git worktree" unless status.all? { |entry| entry.start_with?(cache_entry) }
+      raise ArgumentError, "#{operation} requires a clean Git worktree" unless status.all? { |entry| entry.start_with?(cache_entry) }
 
       execute("rev-parse", "--verify", "HEAD^{commit}").strip
     rescue Error => e

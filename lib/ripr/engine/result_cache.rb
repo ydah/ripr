@@ -9,14 +9,15 @@ require_relative "../core/reuse_planner"
 module Ripr
   module Engine
     class ResultCache
-      attr_reader :baseline_env_hash, :source_hash, :test_hashes, :previous, :graph
+      attr_reader :env_hash, :baseline_env_hash, :source_hash, :test_hashes, :previous, :graph
 
-      def initialize(config, sources:, test_files:, framework:, method_hashes:, test_ids:, probe_sites:, graph: nil, load_dependencies: nil)
+      def initialize(config, sources:, test_files:, framework:, method_hashes:, test_ids:, probe_sites:, graph: nil, load_dependencies: nil,
+                     shared_baseline: false)
         @config = config
         @method_hashes = method_hashes
         @snapshot = Snapshot.new
         @repeated_baseline = (config[:baseline_runs] || 1) > 1
-        @previous = config[:full] || config[:boot] || config[:rails] || @repeated_baseline ? {} : @snapshot.read
+        @previous = shared_baseline || config[:full] || config[:boot] || config[:rails] || @repeated_baseline ? {} : @snapshot.read
         @source_hash = digest(sources.sort.to_h.transform_values { |source| Digest::SHA256.hexdigest(source) })
         @test_hashes = test_files.sort.to_h { |path| [path, Digest::SHA256.file(path).hexdigest] }
         lockfiles = %w[Gemfile.lock .rspec .rspec-local]

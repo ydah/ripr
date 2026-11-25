@@ -24,11 +24,13 @@ module Ripr
     end
 
     def call
-      command = %w[run list init accept init-skill mcp reach-map].include?(@arguments.first) ? @arguments.shift : "run"
+      command = %w[run list init accept init-skill mcp reach-map shard-plan].include?(@arguments.first) ? @arguments.shift : "run"
       @list_kind = @arguments.shift if command == "list" && %w[mutants operators].include?(@arguments.first)
       parser.parse!(@arguments)
       return 0 if @help
       return mcp if command == "mcp"
+
+      @shard_total = @arguments.shift if command == "shard-plan"
 
       directory = @arguments.length == 1 && File.directory?(@arguments.first) &&
                   (File.directory?(File.join(@arguments.first, "test")) || File.directory?(File.join(@arguments.first, "spec")))
@@ -57,8 +59,10 @@ module Ripr
 
     def parser
       OptionParser.new do |options|
-        options.banner = "Usage: ripr [run|list|init|accept|init-skill|mcp|reach-map] [options] [PATHS...]"
+        options.banner = "Usage: ripr [run|list|init|accept|init-skill|mcp|reach-map|shard-plan TOTAL] [options] [PATHS...]"
         options.on("--since REF") { |v| @overrides[:since] = v }
+        options.on("--shard INDEX/TOTAL", "Run one slice from a shared baseline plan") { |v| @overrides[:shard] = v }
+        options.on("--shard-plan PATH", "Path to the shared shard plan") { |v| @overrides[:shard_plan] = v }
         options.on("--reach-map FILE", "Select baseline tests for --since using a trusted reach map") { |v| @overrides[:reach_map] = v }
         options.on("--reach-map-files GLOB", "Allow matching independent test files to be skipped (repeatable)") do |pattern|
           (@overrides[:reach_map_files] ||= []) << pattern
@@ -108,10 +112,14 @@ module Ripr
 
     def execute(command)
       config = Config.load(command == "list" ? @overrides.merge(dry_run: true) : @overrides)
+      if (config[:shard] && command != "run") || (config[:shard_plan] && !config[:shard] && command != "shard-plan")
+        raise ArgumentError, "use --shard with run and --shard-plan with shard-plan or --shard"
+      end
       return init if command == "init"
       return init_skill if command == "init-skill"
       return accept(config) if command == "accept"
       return record_reach_map(config) if command == "reach-map"
+      return record_shard_plan(config) if command == "shard-plan"
 
       if command == "list" && @list_kind == "operators"
         @stdout.puts config[:operators]
@@ -134,6 +142,7 @@ module Ripr
       runner.profile&.phase("report", report_started)
       runner.profile&.write(config[:report_dir], results.length, runner.metrics, runner.baseline)
       return 0 if config[:dry_run] || command == "list"
+      return 0 if config[:shard]
       return 2 if config[:fail_on_survived] && summary.fetch("survived").positive?
       return 2 if config[:thresholds]["break"] && summary.fetch("score") < config[:thresholds].fetch("break")
 
@@ -142,6 +151,14 @@ module Ripr
 
     def record_reach_map(config)
       path = Engine::Runner.new(config, @arguments).record_reach_map
+      @stdout.puts "Wrote #{path}"
+      0
+    end
+
+    def record_shard_plan(config)
+      runner = Engine::Runner.new(config, @arguments)
+      path = runner.record_shard_plan(@shard_total)
+      runner.warnings.each { |message| @stderr.puts "ripr: #{message}" }
       @stdout.puts "Wrote #{path}"
       0
     end

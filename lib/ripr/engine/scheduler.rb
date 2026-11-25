@@ -33,6 +33,12 @@ module Ripr
         results.concat(record_results(completed, originals, diagnoses)).sort_by { |mutant| mutant.fetch("full_id") }
       end
 
+      def shard_costs(selected)
+        _, ready = classify(selected)
+        costs = ready.to_h { |mutant| [mutant.fetch("full_id"), estimated_cost(mutant)] }
+        selected.to_h { |mutant| [mutant.full_id, costs.fetch(mutant.full_id, 0)] }
+      end
+
       private
 
       def classify(selected)

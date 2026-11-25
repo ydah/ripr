@@ -16,7 +16,7 @@ module Ripr
       reporters: ["text"], report_dir: ".ripr/report", since: nil, only: [], full: false,
       dry_run: false, fail_on_survived: false, verify_not_infected: false, verify_killed: false, seed: 0, boot: nil, rails: false,
       include_tests_diff: false, static: false, call_graph_reuse: false, typecheck: nil, profile: false, reach_map: nil,
-      reach_map_files: [], baseline_runs: 1
+      reach_map_files: [], baseline_runs: 1, shard: nil, shard_plan: nil
     }.freeze
 
     def self.load(overrides = {}, path: ".ripr.yml")
