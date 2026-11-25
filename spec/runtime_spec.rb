@@ -272,6 +272,21 @@ RSpec.describe "mutation runtime" do
     expect { JSON.generate(snapshot) }.not_to raise_error
   end
 
+  it "preserves scalar types and payloads in serialized result snapshots" do
+    value = [:ready, -0.0, Rational(3, 2), 42, +"ready"]
+    snapshot = JSON.parse(JSON.generate(Ripr::Value.snapshot(value)))
+    expected_values = [
+      ["Symbol", %w[US-ASCII 7265616479]],
+      ["Float", %w[ASCII-8BIT 8000000000000000]],
+      ["Rational", 3, 2],
+      ["Integer", 42],
+      ["String", false, %w[UTF-8 7265616479]]
+    ]
+
+    expect(snapshot.first).to eq("Array")
+    expect(snapshot.last).to eq(expected_values)
+  end
+
   it "rejects unsupported collections even when one object appears on both sides" do
     cycle = []
     cycle << cycle
