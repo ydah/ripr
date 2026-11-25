@@ -47,11 +47,17 @@ module Ripr
         record = @previous.fetch("mutants", {})[mutant.fetch("full_id")]
         return if @config[:verify_not_infected] && record.is_a?(Hash) && record["status"] == "not_infected"
         return if @config[:verify_killed] && record.is_a?(Hash) && record["status"] == "killed"
-        return unless Core::ReusePlanner.reusable?(record, mutant, env_hash: @env_hash, test_hashes: @test_hashes) ||
-                      reusable_graph?(record, mutant, probe)
+
+        exact = Core::ReusePlanner.reusable?(record, mutant, env_hash: @env_hash, test_hashes: @test_hashes)
+        return unless exact || reusable_graph?(record, mutant, probe)
         return unless valid_record?(record)
 
-        record.merge(mutant).merge("reused" => true)
+        result = record.merge(mutant).merge("reused" => true)
+        if !exact && Core::Classifier::PROPAGATION.include?(result["status"])
+          result.delete("propagation")
+          result["status"] = "not_detected"
+        end
+        result
       end
 
       def previous_killer(mutant, ids, tests)
@@ -111,7 +117,8 @@ module Ripr
 
       def reusable_graph?(record, mutant, probe)
         return false unless @graph && probe && record.is_a?(Hash) && record["graph_context"] == @graph_context
-        return false unless %w[killed not_detected].include?(record["status"])
+        return false unless record["status"] == "killed" || Core::Classifier::PROPAGATION.include?(record["status"]) ||
+                            record["status"] == "not_detected"
         return false unless record["full_id"] == mutant["full_id"] && record["method_hash"] == mutant["method_hash"]
         return false if probe.fetch("load_reached").include?(mutant.fetch("site"))
 
@@ -128,11 +135,17 @@ module Ripr
 
       def valid_record?(record)
         return false unless record.is_a?(Hash) && samples?(record["observed"]) && record["covering_tests"].is_a?(Array)
+        return false if record["status"] == "not_revealed" && !valid_propagation?(record["propagation"])
 
         record["covering_tests"].all? do |test|
           test.is_a?(Hash) && test["id"].is_a?(String) && !test["id"].empty? &&
             test["file"].is_a?(String) && !test["file"].empty? && test["line"].is_a?(Integer) && test["line"].positive?
         end
+      end
+
+      def valid_propagation?(data)
+        data.is_a?(Hash) && data["test_id"].is_a?(String) && data["call"].is_a?(Integer) && data["call"].positive? &&
+          data["original"].is_a?(Array) && data["mutant"].is_a?(Array)
       end
 
       def samples?(samples)

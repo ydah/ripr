@@ -63,7 +63,9 @@ ripr observes an unmodified test run, then runs relevant tests against each muta
 | --- | --- | --- |
 | `not_reached` | No test ran the expression. | Exercise the method and branch. |
 | `not_infected` | Tests ran the expression, and the mutation left its value unchanged for the observed inputs. | Add a boundary case or another input. |
-| `not_detected` | The mutation was exercised and tests still passed. | Check whether the changed value reaches an assertion. |
+| `not_propagated` | The observed method exits stayed the same. | Try inputs that change the return value or exception. |
+| `not_revealed` | A method exit changed and the covering tests passed. | Assert the observed change in the test shown. |
+| `not_detected` | Tests passed and ripr could not reliably compare the method exits. | Check the return value and side effects for a missed assertion. |
 
 Ages 20 and 10 produce the same results for `age >= 18` and `age > 18`. The text report shows the observed operands and suggests a pair that changes the result.
 
@@ -86,7 +88,7 @@ The default report is text. Write an HTML report and its `mutation.json` data to
 
 For tools and coding agents, use `bundle exec ripr --since origin/main --reporter agent` to emit [JSON with a suggested action for each gap](schema/agent-v1.json). Keep `agent` as the only stdout reporter when piping JSON. Use `bundle exec ripr --only MUTANT_ID` to rerun a single mutation.
 
-Use `--profile` to write phase and worker timings in milliseconds, executed test counts, and cache hit rates to `.ripr/report/profile.json`. Set `--report-dir` to change the destination. Interrupted workers have unknown test counts and are omitted from the tests-per-mutation average.
+Use `--profile` to write phase and worker timings in milliseconds, executed test counts, and cache hit rates to `.ripr/report/profile.json`. Diagnostic replays appear under `diagnosis`. Set `--report-dir` to change the destination. Interrupted workers have unknown test counts and are omitted from the tests-per-mutation average.
 
 Install the [bundled agent skill](skills/mutation-test-loop/SKILL.md) with `bundle exec ripr init-skill`. The default destination is `.claude/skills/mutation-test-loop`. Use `--dir` to choose another directory.
 

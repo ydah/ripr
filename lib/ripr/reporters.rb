@@ -15,19 +15,24 @@ module Ripr
     HINTS = {
       "not_reached" => "Add a test that executes this method and branch.",
       "not_infected" => "Add boundary inputs that change the mutated expression's value.",
-      "not_detected" => "Assert the changed return value or side effect. Accept only if the mutation is equivalent."
+      "not_propagated" => "Try inputs that change the observed method exit, or check whether the mutation is equivalent.",
+      "not_revealed" => "Assert the changed return value or exception in the covering test.",
+      "not_detected" => "Check the return value and side effects for a missed assertion. Accept only if the mutation is equivalent."
     }.freeze
     LOAD_NOTE = "Reached outside a tracked test, possibly during loading or in a background thread. " \
                 "Switching cannot change effects already computed before test execution."
     STATIC_NOTE = "This mutation is active before the source loads in a fresh process."
     MTE_STATUSES = { "killed" => "Killed", "timeout" => "Timeout", "error" => "RuntimeError", "not_reached" => "NoCoverage",
-                     "not_infected" => "Survived", "not_detected" => "Survived", "accepted" => "Ignored",
+                     "not_infected" => "Survived", "not_detected" => "Survived", "not_propagated" => "Survived",
+                     "not_revealed" => "Survived", "accepted" => "Ignored",
                      "static" => "Ignored", "invalid" => "CompileError", "planned" => "Pending" }.freeze
 
     def self.agent(results, run, summary = Core::Classifier.summary(results), config: nil)
       gaps = results.filter_map do |mutant|
         status = mutant.fetch("status")
-        next unless ACTIONS.key?(status)
+        diagnosed = Core::Classifier::PROPAGATION.include?(status)
+        kind = diagnosed ? "not_detected" : status
+        next unless ACTIONS.key?(kind)
 
         id = mutant.fetch("id")
         hint = HINTS.fetch(status)
@@ -44,12 +49,16 @@ module Ripr
         flags += " --operators #{operator}" if Core::Operators::EXTRA_NAMES.include?(operator)
         gap = mutant.slice("id", "full_id", "location", "subject", "operator", "original", "mutated", "observed", "covering_tests",
                            "load_reached")
-                    .merge("kind" => status, "action" => ACTIONS.fetch(status), "hint" => hint,
+                    .merge("kind" => kind, "action" => ACTIONS.fetch(kind), "hint" => hint,
                            "rerun" => "ripr --only #{id}#{flags}", "accept" => "ripr accept #{id}#{flags} --reason \"...\"")
+        gap["stage"] = status if diagnosed
+        gap["propagation"] = mutant.fetch("propagation") if mutant.key?("propagation")
         gap["suggested_inputs"] = suggestion.fetch(:inputs) if suggestion
         gap
       end
-      { "schema" => "ripr.agent/v1", "run" => run, "summary" => summary, "gaps" => gaps }
+      diagnosed = Core::Classifier::PROPAGATION.sum { |status| summary.fetch(status, 0) }
+      legacy = summary.except(*Core::Classifier::PROPAGATION).merge("not_detected" => summary.fetch("not_detected") + diagnosed)
+      { "schema" => "ripr.agent/v1", "run" => run, "summary" => legacy, "gaps" => gaps }
     end
 
     def self.mte(results, sources, thresholds)
@@ -59,6 +68,7 @@ module Ripr
           reason = mutant["accepted"] || mutant["invalid_reason"] || mutant["error"] || mutant.fetch("status")
           suggestion = Core::InputSuggestions.for(mutant)
           reason += ". #{suggestion_message(suggestion)}" if suggestion
+          reason += ". #{propagation_message(mutant)}" if mutant["propagation"]
           reason += ". #{load_note(mutant)}" if mutant["load_reached"]
           { "id" => mutant.fetch("id"), "mutatorName" => mutant.fetch("operator"), "replacement" => mutant.fetch("mutated"),
             "status" => MTE_STATUSES.fetch(mutant.fetch("status")), "statusReason" => reason,
@@ -82,12 +92,13 @@ module Ripr
           stdout.puts "Reused #{runner.metrics['reused']} · Baseline #{runner.metrics['baseline_tests_run']} tests · " \
                       "#{summary['static']} static variants excluded"
           results.each do |mutant|
-            next unless ACTIONS.key?(mutant["status"]) || config[:dry_run]
+            next unless HINTS.key?(mutant["status"]) || config[:dry_run]
 
             location = mutant.fetch("location")
             stdout.puts "#{mutant['status'].tr('_', ' ')} #{location['file']}:#{location['line']}:#{location['column']} " \
                         "#{mutant['original'].inspect} → #{mutant['mutated'].inspect} id=#{mutant['id']}"
             stdout.puts "  observed: #{JSON.generate(mutant['observed'])}" unless mutant.fetch("observed", []).empty?
+            stdout.puts "  #{propagation_message(mutant)}" if mutant["propagation"]
             if (suggestion = Core::InputSuggestions.for(mutant))
               stdout.puts "  suggested inputs: #{JSON.generate(suggestion.fetch(:inputs))}"
               stdout.puts "  #{suggestion[:reason]}" if suggestion[:reason]
@@ -98,7 +109,7 @@ module Ripr
           stdout.puts JSON.generate(agent(results, run, summary, config: config))
         when "github"
           results.each do |mutant|
-            next unless ACTIONS.key?(mutant["status"])
+            next unless HINTS.key?(mutant["status"])
 
             location = mutant.fetch("location")
             path = location.fetch("file")
@@ -135,7 +146,27 @@ module Ripr
       ["Try operand pairs #{JSON.generate(suggestion.fetch(:inputs))}.", suggestion[:reason]].compact.join(" ")
     end
 
-    private_class_method :suggestion_message
+    def self.propagation_message(mutant)
+      proof = mutant.fetch("propagation")
+      test = mutant.fetch("covering_tests").find { |entry| entry["id"] == proof.fetch("test_id") }
+      location = test ? "#{test.fetch('file')}:#{test.fetch('line')}" : proof.fetch("test_id")
+      "#{mutant.fetch('subject')} #{describe_exit(proof.fetch('original'))} → " \
+        "#{describe_exit(proof.fetch('mutant'))} in #{location} (call #{proof.fetch('call')})."
+    end
+
+    def self.describe_exit(exit)
+      kind, value = exit
+      case kind
+      when "return"
+        value = value[1] if value.is_a?(Array) && %w[TrueClass FalseClass NilClass Integer].include?(value.first)
+        "returned #{JSON.generate(value)}"
+      when "raise" then "raised #{value}"
+      when "not_called" then "was not called"
+      else "had an unknown exit"
+      end
+    end
+
+    private_class_method :suggestion_message, :propagation_message, :describe_exit
 
     def self.html(report)
       data = JSON.generate(report).gsub("<") { "\\u003c" }

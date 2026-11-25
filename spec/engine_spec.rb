@@ -162,10 +162,11 @@ RSpec.describe "mutation execution" do
   end
 
   it "counts survivors and errors in the score denominator" do
-    results = %w[killed timeout not_reached not_infected not_detected error accepted invalid static].map { |s| { "status" => s } }
+    statuses = %w[killed timeout not_reached not_infected not_detected not_propagated not_revealed error accepted invalid static]
+    results = statuses.map { |status| { "status" => status } }
     summary = Ripr::Core::Classifier.summary(results)
-    expect(summary.fetch("score")).to eq(33.3)
-    expect(summary.fetch("survived")).to eq(3)
+    expect(summary.fetch("score")).to eq(25.0)
+    expect(summary.fetch("survived")).to eq(5)
   end
 
   it "collects a completed worker and stops its grandchild even when it holds the pipe open" do

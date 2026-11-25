@@ -25,12 +25,12 @@ module Oracle
     profile = JSON.parse(File.read(File.join(report, "profile.json")))
     raise "No baseline tests ran for #{File.basename(directory)}" unless profile.dig("baseline", "tests_run").positive?
 
-    results = JSON.parse(File.read(File.join(report, "mutation.json")))
+    results = JSON.parse(File.binread(File.join(report, "mutation.json")))
     [agent, results.fetch("files"), profile.fetch("mutations").fetch("attempts"), stderr]
   end
 
   def observations(agent, files)
-    gaps = agent.fetch("gaps").to_h { |gap| [gap.fetch("id"), gap.fetch("kind")] }
+    gaps = agent.fetch("gaps").to_h { |gap| [gap.fetch("id"), gap.fetch("stage", gap.fetch("kind"))] }
     files.flat_map do |path, data|
       lines = data.fetch("source").lines
       data.fetch("mutants").map do |mutant|

@@ -1,15 +1,17 @@
 # frozen_string_literal: true
 
 require_relative "child"
+require_relative "method_exits"
 
 module Ripr
   module Engine
     class Scheduler
-      def initialize(config, baseline, table, cache, warnings:, metrics:, rails: nil, static_run: nil, profile: nil)
+      def initialize(config, baseline, table, cache, planned:, warnings:, metrics:, rails: nil, static_run: nil, profile: nil)
         @config = config
         @baseline = baseline
         @table = table
         @cache = cache
+        @planned = planned
         @warnings = warnings
         @metrics = metrics
         @rails = rails
@@ -26,7 +28,8 @@ module Ripr
           execute(mutant, slot, adapter)
         end
         originals = @config[:verify_killed] ? verify_kills(completed, adapter, timeout) : {}
-        results.concat(record_results(completed, originals)).sort_by { |mutant| mutant.fetch("full_id") }
+        diagnoses = diagnose(completed, adapter)
+        results.concat(record_results(completed, originals, diagnoses)).sort_by { |mutant| mutant.fetch("full_id") }
       end
 
       private
@@ -86,7 +89,7 @@ module Ripr
           boot_ms + (@rails&.worker_timeout_ms || 0)
       end
 
-      def record_results(completed, originals)
+      def record_results(completed, originals, diagnoses)
         completed.map do |mutant, outcome|
           status = outcome["status"] || (outcome["success"] ? "not_detected" : "killed")
           failure = outcome["failures"]&.first
@@ -108,11 +111,12 @@ module Ripr
                                                                           "error" => error)
           result["verified"] = true if verification
           result["dependency_hashes"] = outcome["dependency_hashes"] if outcome["dependency_hashes"]
+          result.merge!(diagnoses.fetch(mutant.fetch("full_id"), {}))
           result
         end
       end
 
-      def execute(mutant, slot, adapter, original: false)
+      def execute(mutant, slot, adapter, original: false, targets: nil)
         tests = mutant.fetch("test_ids")
         run = lambda do
           if mutant["static"]
@@ -122,7 +126,10 @@ module Ripr
               site = mutant.fetch("site")
               R.activate(site, @table.fetch(site).index(mutant.fetch("id")) + 1)
             end
-            if @cache.graph && !original
+            if targets
+              result, exits = MethodExits.observe(targets) { adapter.run(tests, fail_fast: true) }
+              result.merge("exits" => exits)
+            elsif @cache.graph && !original
               result, dependencies = @cache.graph.trace { adapter.run(tests, fail_fast: true) }
               result.merge("dependency_hashes" => @cache.graph.signature(dependencies))
             else
@@ -138,6 +145,62 @@ module Ripr
         Child.batch(killed, jobs: @config[:jobs], timeout: timeout, on_result: @profile&.method(:record_replay)) do |mutant, slot|
           execute(mutant, slot, adapter, original: true)
         end.to_h
+      end
+
+      def diagnose(completed, adapter)
+        survivors = completed.filter_map do |mutant, outcome|
+          if outcome["success"] && !outcome["status"] && !mutant["static"] && !mutant["load_reached"] && !mutant["verification_status"]
+            ids = mutant.fetch("test_ids") | mutant.fetch("covering_tests").map { |test| test.fetch("id") }
+            mutant.merge("test_ids" => ids)
+          end
+        end
+        return {} if survivors.empty?
+
+        targets = MethodExits.targets(@planned).slice(*survivors.map { |mutant| mutant.fetch("subject") }.uniq)
+        jobs = survivors.select { |mutant| targets.key?(mutant.fetch("subject")) }
+        originals = stable_exits(jobs, targets, adapter)
+        trials = jobs.filter_map do |mutant|
+          subject = mutant.fetch("subject")
+          [mutant, targets.slice(subject)] if originals.dig(mutant.fetch("test_ids"), "exits", subject)
+        end
+        observe_trials(trials, adapter, original: false).each_with_object({}) do |((mutant, _), outcome), diagnoses|
+          ids = mutant.fetch("test_ids")
+          baseline = originals.fetch(ids)
+          next unless outcome["success"] && outcome.fetch("tests").keys == baseline.fetch("order")
+
+          subject = mutant.fetch("subject")
+          diagnosis = MethodExits.compare(baseline.fetch("exits").fetch(subject), outcome.fetch("exits")[subject], ids)
+          diagnoses[mutant.fetch("full_id")] = diagnosis if diagnosis
+        end
+      end
+
+      def stable_exits(jobs, targets, adapter)
+        trials = jobs.group_by { |mutant| mutant.fetch("test_ids") }.values.map do |group|
+          [group.first, targets.slice(*group.map { |mutant| mutant.fetch("subject") })]
+        end
+        first = observe_trials(trials, adapter, original: true).to_h
+        repeated = trials.select do |mutant, subjects|
+          outcome = first.fetch([mutant, subjects])
+          outcome["success"] && outcome.fetch("tests").keys.sort == mutant.fetch("test_ids").sort
+        end
+        observe_trials(repeated, adapter, original: true).each_with_object({}) do |(trial, outcome), stable|
+          before = first.fetch(trial)
+          order = before.fetch("tests").keys
+          next unless outcome["success"] && outcome.fetch("tests").keys == order
+
+          exits = MethodExits.stable(before.fetch("exits"), outcome.fetch("exits"))
+          stable[trial.first.fetch("test_ids")] = { "exits" => exits, "order" => order }
+        end
+      end
+
+      def observe_trials(trials, adapter, original:)
+        # Rails exposes the slot to tests through TEST_ENV_NUMBER.
+        jobs = @rails ? 1 : @config[:jobs]
+        timeout = ->((mutant, _)) { deadline(mutant) }
+        on_result = ->((mutant, _), outcome, elapsed) { @profile.record_diagnosis(mutant, outcome, elapsed) } if @profile
+        Child.batch(trials, jobs: jobs, timeout: timeout, on_result:) do |(mutant, targets), slot|
+          execute(mutant, slot, adapter, original: original, targets: targets)
+        end
       end
     end
   end

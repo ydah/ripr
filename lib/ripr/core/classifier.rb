@@ -3,8 +3,9 @@
 module Ripr
   module Core
     module Classifier
-      SURVIVORS = %w[not_reached not_infected not_detected].freeze
-      STATUSES = %w[killed timeout error not_reached not_infected not_detected accepted static invalid].freeze
+      PROPAGATION = %w[not_propagated not_revealed].freeze
+      SURVIVORS = (%w[not_reached not_infected not_detected] + PROPAGATION).freeze
+      STATUSES = (%w[killed timeout error] + SURVIVORS + %w[accepted static invalid]).freeze
 
       def self.summary(results)
         counts = STATUSES.to_h { |status| [status, results.count { |result| result["status"] == status }] }

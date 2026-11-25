@@ -231,10 +231,13 @@ RSpec.describe "incremental ripr commands" do
       File.open(source, "a") { |file| file.puts "module Sample; def self.other?(value); value >= 5; end; end" }
 
       command(directory, "--call-graph-reuse")
+      before = snapshot(directory).fetch("mutants").values.find { |mutant| mutant["subject"] == "Sample.adult?" }
+      expect(before).to include("status" => "not_revealed", "propagation" => a_kind_of(Hash))
       File.write(source, File.read(source).sub("value >= 5", "value >= 4"))
       command(directory, "--call-graph-reuse")
       reused = snapshot(directory).fetch("mutants").values.select { |mutant| mutant["reused"] }
-      expect(reused.map { |mutant| mutant.fetch("subject") }).to eq(["Sample.adult?"])
+      expect(reused).to contain_exactly(include("subject" => "Sample.adult?", "status" => "not_detected"))
+      expect(reused.first).not_to have_key("propagation")
     end
   end
 

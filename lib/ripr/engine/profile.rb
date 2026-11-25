@@ -9,6 +9,7 @@ module Ripr
         @phases = %w[plan instrument boot baseline mutation report].to_h { |phase| [phase, 0.0] }
         @mutations = []
         @replays = []
+        @diagnoses = []
         @probe_skipped = 0
       end
 
@@ -32,6 +33,10 @@ module Ripr
         @replays << attempt(mutant, outcome, duration)
       end
 
+      def record_diagnosis(mutant, outcome, duration)
+        @diagnoses << attempt(mutant, outcome, duration)
+      end
+
       def write(directory, selected, metrics, baseline)
         baseline_total = baseline ? baseline.fetch("tests").size : 0
         baseline_run = metrics.fetch("baseline_tests_run")
@@ -47,7 +52,7 @@ module Ripr
           "mutations" => execution(@mutations).merge("selected" => selected, "cached" => cached, "probe_skipped" => @probe_skipped,
                                                      "cache_hit_fraction" => fraction(cached, eligible),
                                                      "skipped_fraction" => fraction(skipped, eligible)),
-          "verification" => execution(@replays)
+          "verification" => execution(@replays), "diagnosis" => execution(@diagnoses)
         )
       end
 

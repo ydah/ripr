@@ -31,6 +31,17 @@
           "id": {"type": "string", "pattern": "^[a-f0-9]{10}$"},
           "full_id": {"type": "string"},
           "kind": {"enum": ["not_reached", "not_infected", "not_detected"]},
+          "stage": {"enum": ["not_propagated", "not_revealed"]},
+          "propagation": {
+            "type": "object",
+            "required": ["test_id", "call", "original", "mutant"],
+            "properties": {
+              "test_id": {"type": "string"},
+              "call": {"type": "integer", "minimum": 1},
+              "original": {"type": "array"},
+              "mutant": {"type": "array"}
+            }
+          },
           "action": {"enum": ["add_test", "add_input", "strengthen_assertion"]},
           "hint": {"type": "string"},
           "load_reached": {"type": "boolean"},

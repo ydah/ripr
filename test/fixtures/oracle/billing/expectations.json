@@ -18,7 +18,7 @@
     {
       "original": "quantity >= 5",
       "replacement": "quantity > 5",
-      "status": "not_detected",
+      "status": "not_propagated",
       "stage": "equivalent",
       "reason": "At 5 the comparison changes which array is selected. Either array has length two, so for every integer quantity the public result is two."
     },

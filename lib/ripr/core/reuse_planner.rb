@@ -1,9 +1,11 @@
 # frozen_string_literal: true
 
+require_relative "classifier"
+
 module Ripr
   module Core
     module ReusePlanner
-      REUSABLE_STATUSES = %w[killed timeout not_reached not_infected not_detected].freeze
+      REUSABLE_STATUSES = (%w[killed timeout] + Classifier::SURVIVORS).freeze
 
       def self.reusable?(record, mutant, env_hash:, test_hashes:, newly_reached: [])
         return false unless record.is_a?(Hash) && REUSABLE_STATUSES.include?(record["status"])

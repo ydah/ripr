@@ -43,7 +43,7 @@ module CompareVerdicts
     flags << "--rails" if rails
     capture(directory, File.join(ROOT, "exe/ripr"), "run", "--full", "--verify-not-infected", "--jobs", "1", "--seed", "0",
             "--framework", framework, "--operators", operators.join(","), "--profile", "--reporter", "json", *flags, source, rails: rails)
-    report = JSON.parse(File.read(File.join(directory, ".ripr/report/mutation.json")))
+    report = JSON.parse(File.binread(File.join(directory, ".ripr/report/mutation.json")))
     profile = JSON.parse(File.read(File.join(directory, ".ripr/report/profile.json")))
     raise "No ripr baseline tests ran" unless profile.dig("baseline", "tests_run").positive?
 

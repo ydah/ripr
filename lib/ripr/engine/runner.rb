@@ -160,8 +160,9 @@ module Ripr
         selected |= select_test_mutants(selection.candidates, selection.changed_tests) unless selection.changed_tests.empty?
         selected = check_types(selected) if @config[:typecheck]
         static_run = StaticRun.new(worker_config, @paths, boot_ms: boot_ms)
-        scheduler = Scheduler.new(worker_config, @baseline, @table, @cache, warnings: @warnings, metrics: @metrics,
-                                                                            rails: @rails, static_run: static_run, profile: @profile)
+        scheduler = Scheduler.new(worker_config, @baseline, @table, @cache, planned: @mutants, warnings: @warnings,
+                                                                            metrics: @metrics, rails: @rails,
+                                                                            static_run: static_run, profile: @profile)
         results = scheduler.call(selected, adapter, &)
         @profile&.phase("mutation", started)
         @cache.write(results, @baseline, @metrics)

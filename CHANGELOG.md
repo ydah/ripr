@@ -9,6 +9,7 @@
 - Warm the parent process before forking and cap automatic worker counts by available memory.
 - Avoid SQLite snapshot lock contention between Rails workers.
 - Skip equivalent native array additions and subtractions with an empty right operand.
+- Distinguish unchanged method exits from changed returns or exceptions missed by assertions.
 
 ## 0.2.0 — 2026-11-24
 

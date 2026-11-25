@@ -25,7 +25,7 @@
     {
       "original": "weight >= 20",
       "replacement": "weight > 20",
-      "status": "not_detected",
+      "status": "not_revealed",
       "stage": "propagated_unrevealed",
       "reason": "At 20 kg the oversize field changes from true to false in the returned quote. The test asserts only the currency field."
     },

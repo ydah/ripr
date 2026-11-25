@@ -317,7 +317,7 @@ RSpec.describe "ripr command" do
     Dir.mktmpdir("ripr-report") do |dir|
       _, stderr, status = command("--reporter", "html", "--reporter", "json", "--report-dir", dir, "--full")
       expect(status.exitstatus).to eq(0), stderr
-      expect(JSON.parse(File.read(File.join(dir, "mutation.json"))).fetch("schemaVersion")).to eq("2")
+      expect(JSON.parse(File.binread(File.join(dir, "mutation.json"))).fetch("schemaVersion")).to eq("2")
       expect(File.read(File.join(dir, "index.html"))).to include("ripr mutation report")
     end
   end
