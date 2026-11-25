@@ -30,6 +30,12 @@ The disabled-instrumentation samples overlapped with their plain samples on this
 | tzinfo | 15.91 (11.77–22.87) | 13.61 (11.44–19.91) | −14.5% |
 | hashdiff | 37.35 (26.83–42.30) | 32.46 (24.47–39.79) | −13.1% |
 
+### Fork warmup
+
+On the same host and Ruby version, five alternating pairs on Fizzy ran 27 baseline tests and executed 15 mutants per run with four workers. Median wall time was 16.47 seconds without warmup (15.29–17.63) and 15.92 seconds with warmup (14.24–18.23). The ranges overlap and all mutation verdicts matched. The ripr code included the [SQLite snapshot fix](https://github.com/ydah/ripr/commit/67e8018).
+
+Use the Fizzy setup above with `--rails --full --profile --jobs 4 --timeout-base 10000 --operators comparison,condition_negation,return_nil`. Target `app/models/assignment.rb` and `app/models/card/{assignable,taggable,closeable}.rb`. For the control, preload a Ruby file defining `def Process.warmup; end` via `RUBYOPT=-r/path/to/file.rb`.
+
 ## Reproduce
 
 Use Ruby 4.0.10, Bundler, Git, curl, tar, and the Fizzy system libraries listed in the [benchmark workflow](../.github/workflows/benchmark.yml). The runner downloads the archived revisions into temporary directories, installs dependencies, and writes wall-time samples, mutation counts, and ripr profiles to JSON.
