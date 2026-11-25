@@ -19,7 +19,7 @@ module Ripr
       PROCESS_OWNERS = [Kernel, Kernel.singleton_class, Process.singleton_class, IO.singleton_class].freeze
       ARRAY_RANDOM = %i[sample shuffle shuffle!].freeze
       RUNTIME_EFFECTS = (%i[now current today new at clock_gettime random_number rand srand
-                           uuid hex bytes urandom pid ppid] + ARRAY_RANDOM).freeze
+                            uuid hex bytes urandom pid ppid] + ARRAY_RANDOM).freeze
       REFLECTION = %i[eval class_eval module_eval instance_eval].freeze
       NETWORK = %i[new open start connect connect_nonblock bind listen accept accept_nonblock tcp udp getaddrinfo
                    gethostbyname send recv].freeze
