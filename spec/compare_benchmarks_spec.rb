@@ -56,11 +56,12 @@ RSpec.describe "end-to-end benchmark script" do
           File.write(".ripr/marker", "cold")
         end
         File.open("invocations", "a") { |file| file.puts(File.read("source.rb").strip) }
+        File.write(".ripr/profile.json", JSON.generate("schema" => "ripr.profile/v1", "source" => File.read("source.rb")))
         puts JSON.generate("summary" => { "killed" => 1, "survived" => 0 })
       RUBY
       command = [RbConfig.ruby, "-e", code]
       manifest = [{ "project" => "demo", "tool" => "ripr", "directory" => directory,
-                    "file" => "source.rb", "before" => "42", "after" => "(42)", "caches" => [".ripr"],
+                    "file" => "source.rb", "before" => "42", "after" => "(42)", "caches" => [".ripr"], "profile" => ".ripr/profile.json",
                     "full" => command, "incremental" => command, "format" => "ripr" }]
       manifest_path = File.join(directory, "manifest.json")
       output_path = File.join(directory, "results.json")
@@ -72,6 +73,8 @@ RSpec.describe "end-to-end benchmark script" do
       expect(result.fetch("full").size).to eq(3)
       expect(result.fetch("incremental").size).to eq(3)
       expect(result.fetch("full").first.fetch("summary").fetch("total")).to eq(1)
+      expect(result.fetch("full").first.fetch("profile").fetch("source")).to eq(source)
+      expect(result.fetch("incremental").first.fetch("profile").fetch("source")).to eq("def answer; (42); end\n")
       invocations = File.readlines(File.join(directory, "invocations"))
       expect(invocations).to eq(["def answer; 42; end\n", "def answer; (42); end\n"] * 3)
       expect(File.read(File.join(directory, "source.rb"))).to eq(source)

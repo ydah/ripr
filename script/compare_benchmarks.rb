@@ -105,6 +105,8 @@ module CompareBenchmarks
   end
 
   def run(config, command, label)
+    profile = contained(config.fetch("directory"), config.fetch("profile")) if config.key?("profile")
+    FileUtils.rm_f(profile) if profile
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     stdout = +"".b
     stderr = +"".b
@@ -151,7 +153,9 @@ module CompareBenchmarks
     counts = summary(config, stdout)
     raise "No mutants reported for the full scope" if label.start_with?("cold-") && counts.fetch("total").zero?
 
-    { "seconds" => elapsed, "exit_code" => status.exitstatus, "summary" => counts }
+    result = { "seconds" => elapsed, "exit_code" => status.exitstatus, "summary" => counts }
+    result["profile"] = JSON.parse(File.read(profile)) if profile
+    result
   end
 
   def measure(config)
@@ -165,7 +169,11 @@ module CompareBenchmarks
     edited = original.sub(before, config.fetch("after"))
     result = config.slice("project", "tool", "file", "format").merge("commands" => config.slice("full", "incremental"))
     clear_cache = -> { config.fetch("caches").each { |cache| FileUtils.rm_rf(contained(directory, cache)) } }
-    cold_count = config["probe_only"] ? 1 : 3
+    cold_count = config["probe_only"] ? 1 : config.fetch("samples", 3)
+    unless cold_count.is_a?(Integer) && cold_count.positive? && cold_count.odd?
+      raise ArgumentError, "samples must be a positive odd integer"
+    end
+
     result["full"] = []
     result["incremental"] = [] unless config["probe_only"]
     cold_count.times do |index|
@@ -176,13 +184,13 @@ module CompareBenchmarks
       next if config["probe_only"]
 
       File.binwrite(path, edited)
-      warn "#{config.fetch('project')} #{config.fetch('tool')} edited #{index + 1}/3"
+      warn "#{config.fetch('project')} #{config.fetch('tool')} edited #{index + 1}/#{cold_count}"
       result.fetch("incremental") << run(config, config.fetch("incremental"), "edited-#{index}")
     end
     return result if config["probe_only"]
 
     %w[full incremental].each do |phase|
-      result["#{phase}_median_seconds"] = result.fetch(phase).map { |run| run.fetch("seconds") }.sort.fetch(1)
+      result["#{phase}_median_seconds"] = result.fetch(phase).map { |run| run.fetch("seconds") }.sort.fetch(cold_count / 2)
     end
     result
   rescue StandardError => e
