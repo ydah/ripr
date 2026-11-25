@@ -14,6 +14,7 @@ module Ripr
     PRIVATE_METHOD = Module.instance_method(:private_method_defined?)
     SUPERCLASS = Class.instance_method(:superclass)
     IDENTITY = BasicObject.instance_method(:equal?)
+    NAME = Module.instance_method(:name)
     FROZEN = Object.instance_method(:frozen?)
     FREEZE = Object.instance_method(:freeze)
     ARRAY_SIZE = Array.instance_method(:size)
@@ -140,7 +141,7 @@ module Ripr
     private_class_method :same_token?
 
     def sample(value)
-      case CLASS_OF.bind_call(value).name
+      case NAME.bind_call(CLASS_OF.bind_call(value))
       when "String" then value[0, 32].encode(Encoding::UTF_8, invalid: :replace, undef: :replace)
       when "Symbol", "Rational" then value.to_s
       when "Float" then value < Float::INFINITY && value > -Float::INFINITY ? value : value.to_s
@@ -155,7 +156,6 @@ module Ripr
       MAX_BYTES = 1_024
       INSTANCE_VARIABLES = Object.instance_method(:instance_variables)
       INSTANCE_ID = BasicObject.instance_method(:__id__)
-      NAME = Module.instance_method(:name)
       ENCODING_NAME = Encoding.instance_method(:name)
 
       def call(value)
@@ -395,7 +395,7 @@ module Ripr
 
     def sample_operands(site, left, right)
       pairs = (@samples[site] ||= [])
-      pair = [Value.sample(left), Value.sample(right)]
+      pair = [Value::FREEZE.bind_call(Value.sample(left)), Value::FREEZE.bind_call(Value.sample(right))]
       pairs << pair unless pairs.include?(pair)
     end
   end

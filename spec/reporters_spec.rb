@@ -35,7 +35,8 @@ RSpec.describe Ripr::Reporters do
   it "embeds report data safely for the official viewer with an offline fallback" do
     report = described_class.mte([mutant], { "lib/a.rb" => "</script><script>alert(1)</script>" }, {})
     html = described_class.html(report)
-    expect(html).to include("mutation-test-report-app", "mutation-testing-elements@3.9.0", "integrity=", "fallback-report")
+    expect(html).to include("mutation-test-report-app", 'data-viewer-version="3.9.0"', "ripr-stage", "fallback-report")
+    expect(html).not_to match(%r{<script\b[^>]*\bsrc=["']https?://})
     data = html.match(%r{<script type="application/json" id="mutation-report">(.*?)</script>}m)[1]
     expect(JSON.parse(data)).to eq(report)
     expect(data).not_to include("</script>")

@@ -1,21 +1,21 @@
 ---
 name: mutation-test-loop
-description: Improve Ruby tests using ripr mutation diagnostics, or triage ripr not_reached, not_infected, and not_detected results.
+description: Improve Ruby tests with ripr mutation diagnostics and prioritize gaps by diagnostic stage.
 ---
 
 # Improve tests with ripr
 
-Run `bundle exec ripr --since origin/main --reporter agent` from the project root.
+Run `bundle exec ripr --since origin/main --reporter agent-v2` from the project root.
 Use `--full` for a complete audit or when no suitable Git reference exists.
 A baseline failure must be fixed before interpreting mutation results.
 
-For each entry in `gaps`, read the implementation and the listed tests, then follow its `action`:
+Start with the highest-priority entries in `gaps`. Use `methods` to find the first gap in each method. Read the implementation and the listed tests before following the gap's `action`.
 
-- `add_test`: exercise the method and branch at `location`.
-- `add_input`: turn a `suggested_inputs` pair into a valid input for the code under test. Each pair gives the left and right operands of the expression. If no pair is available, use `original`, `mutated`, and `observed` to find an input that changes the expression. For `age >= 18` becoming `age > 18`, the pair `[18,18]` suggests a test at `age = 18`.
-- `strengthen_assertion`: assert a return value or side effect that belongs to the intended behavior. Infection can also fail to propagate, so inspect the surrounding code before adding an assertion.
+- For `add_test`, exercise the method and branch at `location`.
+- For `add_input`, turn a `suggested_inputs` pair into a valid input for the code under test. For `age >= 18` becoming `age > 18`, the pair `[18,18]` suggests a test at `age = 18`. For `not_propagated`, look for an input that makes the expression change an observable method exit.
+- For `strengthen_assertion`, use `propagation` when available to find the missed change and the covering test. Assert the return value, exception, or side effect that the specification requires.
 
-After a focused test change, run `bundle exec ripr --only ID --reporter agent` using the gap's ID.
+After a focused test change, run `bundle exec ripr --only ID --reporter agent-v2` using the gap's ID.
 Confirm that the mutant is killed, and run the project's normal tests.
 Keep implementation changes for separately demonstrated bugs; strengthen tests against the existing intended behavior.
 

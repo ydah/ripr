@@ -33,6 +33,19 @@ RSpec.describe "mutation runtime" do
     expect(observe(18, 18)).to be(false)
   end
 
+  it "clears an active mutation, probe, and current test when starting a new run" do
+    start_probe
+    Ripr::R.activate(site, 1)
+    expect(Ripr::R.lit("unselected-site", :original, :replacement)).to eq(:original)
+    expect(Ripr::R.lit(site, :original, :replacement)).to eq(:replacement)
+
+    Ripr::R.configure({ "another-site" => ["other-variant"] }, samples: false)
+    expect(Ripr::R.probe).to be_nil
+    expect(Ripr::R.current_test).to be_nil
+    expect(Ripr::R.lit(site, :original, :replacement)).to eq(:original)
+    expect(Ripr::R.on?(site)).to be(false)
+  end
+
   it "records reach and observations without infection away from the boundary" do
     start_probe
     expect(observe(20, 18)).to be(true)
@@ -210,6 +223,10 @@ RSpec.describe "mutation runtime" do
     expect(Ripr::Value.same?(1, 1.0)).to be(false)
     expect(Ripr::Value.same?(Rational(1, 2), Rational(2, 4))).to be(true)
     expect(Ripr::Value.same?("x".encode(Encoding::UTF_8), "x".encode(Encoding::US_ASCII))).to be(false)
+    expect(Ripr::Value.same?(2.0, 2.0)).to be(true)
+    expect(Ripr::Value.same?(2.0, 3.0)).to be(false)
+    expect(Ripr::Value.same?(+"same", +"same")).to be(true)
+    expect(Ripr::Value.same?(+"left", +"right")).to be(false)
   end
 
   it "compares bounded plain arrays, hashes, ranges, and Data fields by their values" do
@@ -236,19 +253,59 @@ RSpec.describe "mutation runtime" do
     end
   end
 
+  it "compares each nested scalar payload by its exact value" do
+    left = { "status" => [:ready, -0.0, Rational(1, 2), 2**127, +"utf-8"] }
+    right = { "status" => [:ready, -0.0, Rational(1, 2), 2**127, +"utf-8"] }
+
+    expect(Ripr::Value.same?(left, right)).to be(true)
+    [:waiting, 0.0, Rational(1, 3), (2**127) + 1, +"different"].each_with_index do |value, index|
+      changed = right.transform_values(&:dup)
+      changed.fetch("status")[index] = value
+      expect(Ripr::Value.same?(left, changed)).to be(false)
+    end
+    expect(Ripr::Value.same?(left, nil)).to be(false)
+    expect(Ripr::Value.same?([nil], [false])).to be(false)
+
+    special = [Float::NAN, Float::INFINITY, -Float::INFINITY]
+    snapshot = Ripr::Value.snapshot(special)
+    expect(snapshot).not_to be_nil
+    expect { JSON.generate(snapshot) }.not_to raise_error
+  end
+
   it "rejects unsupported collections even when one object appears on both sides" do
     cycle = []
     cycle << cycle
     shared = [1]
+    shared_string = +"shared"
     frozen_unsupported = Object.new.freeze
-    values = [cycle, [shared, shared], [frozen_unsupported].freeze, Class.new(Array).new([1]),
+    values = [cycle, [shared, shared], [shared_string, shared_string], [frozen_unsupported].freeze, Class.new(Array).new([1]),
               Array.new(1_000, 1), 100.times.reduce(1) { |value, _index| [value] }, ["x" * 100_000],
-              Array.new(5) { Array.new(32, 1) }, Hash.new { raise "called a default proc" }, { x: 1 }.compare_by_identity]
+              Array.new(5) { Array.new(32, 1) }, Hash.new { raise "called a default proc" }, { x: 1 }.compare_by_identity,
+              { Float::NAN => :ambiguous_key }]
 
     values.each do |value|
       expect(Ripr::Value.pure?(value)).to be(false)
       expect(Ripr::Value.same?(value, value)).to be(false)
     end
+  end
+
+  it "snapshots ordinary large integers and declines ones with excessive storage" do
+    integer = 2**800
+    huge_integer = 2**16_384
+
+    expect(Ripr::Value.same?([integer], [Integer(integer.to_s)])).to be(true)
+    expect(Ripr::Value.same?([integer], [integer + 1])).to be(false)
+    expect(Ripr::Value.snapshot([huge_integer])).to be_nil
+  end
+
+  it "declines very wide arrays, hashes, and Data records" do
+    pairs = (1..48).to_h { |index| [index, index] }
+    record = Data.define(*(1..48).map { |index| :"column_#{index}" })
+
+    expect(Ripr::Value.snapshot(pairs.keys)).to be_nil
+    expect(Ripr::Value.snapshot(pairs)).to be_nil
+    expect(Ripr::Value.snapshot(record.new(*pairs.values))).to be_nil
+    expect(Ripr::Value.snapshot(pairs.select { |key, _| key <= 12 })).not_to be_nil
   end
 
   it "does not compare Hash keys whose insertion-time hash can differ from their current value" do
@@ -261,25 +318,84 @@ RSpec.describe "mutation runtime" do
   end
 
   it "rejects user Data methods and singleton container methods without calling them" do
+    calls = []
     point = Data.define(:value) do
-      def ==(_other)
-        raise "called Data equality"
-      end
+      define_method(:==) { |_other| calls << :equality }
     end
     accessor = Data.define(:value) do
-      def value
-        raise "called a Data accessor"
-      end
+      define_method(:value) { calls << :accessor }
     end
     range = 1..2
     value = [1]
-    value.define_singleton_method(:length) { raise "called a singleton method" }
+    value.define_singleton_method(:length) { calls << :public_array_method }
+    private_value = [1]
+    private_value.define_singleton_method(:private_payload) { calls << :private_array_method }
+    private_value.singleton_class.__send__(:private, :private_payload)
+    string = +"mutable"
+    string.define_singleton_method(:length) { calls << :string_method }
     odd_range = Class.new(Range).new(range.begin, range.end)
 
-    [point.new(1), accessor.new(1), value, odd_range].each do |unsafe|
+    [point.new(1), accessor.new(1), value, private_value, [string], odd_range].each do |unsafe|
       expect(Ripr::Value.pure?(unsafe)).to be(false)
       expect(Ripr::Value.same?(unsafe, unsafe)).to be(false)
     end
+    expect(calls).to be_empty
+  end
+
+  it "declines compounds when a core accessor or implicit conversion has been customized" do
+    numerator = Rational.instance_method(:numerator)
+    size = Array.instance_method(:size)
+    number = Rational(1, 2)
+    compound = [number]
+    plain_array = [1]
+    calls = []
+    results = begin
+      Rational.define_method(:numerator) do
+        calls << :numerator if equal?(number)
+        numerator.bind_call(self)
+      end
+      rational_snapshot = Ripr::Value.snapshot(compound)
+      Rational.define_method(:numerator, numerator)
+      Array.define_method(:size) do
+        calls << :size if equal?(plain_array)
+        size.bind_call(self)
+      end
+      array_snapshot = Ripr::Value.snapshot(plain_array)
+      copy_safe = Ripr::Value.array_copy_operands?(plain_array, [])
+      Array.define_method(:size, size)
+      Array.define_method(:to_hash) do
+        calls << :to_hash if equal?(plain_array)
+        {}
+      end
+      [rational_snapshot, array_snapshot, copy_safe, Ripr::Value.snapshot(plain_array)]
+    ensure
+      Rational.define_method(:numerator, numerator)
+      Array.define_method(:size, size)
+      Array.remove_method(:to_hash) if Array.method_defined?(:to_hash, false)
+    end
+    expect(results).to eq([nil, nil, false, nil])
+    expect(calls).to be_empty
+  end
+
+  it "recognizes only fresh, writable and verified shallow copies with native arrays on both sides" do
+    left = [+"value"]
+    right = []
+    expect(Ripr::Value.empty_array_copy?(left, right, left.dup)).to be(true)
+    expect(Ripr::Value.array_copy_operands?(left, Class.new(Array).new)).to be(false)
+    expect(Ripr::Value.array_copy_operands?(Object.new, right)).to be(false)
+    expect(Ripr::Value.empty_array_copy?([], right, right)).to be(false)
+    expect(Ripr::Value.empty_array_copy?(left, right, left)).to be(false)
+    expect(Ripr::Value.empty_array_copy?(left, right, left.dup.freeze)).to be(false)
+    expect(Ripr::Value.empty_array_copy?(left, right, nil)).to be(false)
+    expect(Ripr::Value.empty_array_copy?(left, right, [+"value"])).to be(false)
+
+    unverified_left = left.dup
+    unverified_left.instance_variable_set(:@extra_state, true)
+    unverified_right = []
+    unverified_right.define_singleton_method(:label) { "custom" }
+    expect(Ripr::Value.empty_array_copy?(unverified_left, right, left.dup)).to be(false)
+    expect(Ripr::Value.empty_array_copy?(left, unverified_right, left.dup)).to be(false)
+    expect(Ripr::Value.empty_array_copy?(left, right, unverified_left)).to be(false)
   end
 
   it "rejects a native alias in a collection's equality path" do
@@ -346,6 +462,29 @@ RSpec.describe "mutation runtime" do
     expect(samples).to eq([["a" * 32, "x"], %w[b x], %w[c x]])
   end
 
+  it "keeps observed strings isolated from both operands and exported snapshots" do
+    start_probe
+    left = +"20"
+    observe(left, +"18")
+    left.replace("caller changed the operand")
+
+    exported = Ripr::R.probe.snapshot.fetch("samples").fetch(site)
+    sample = exported.first.first
+    sample.replace("edited snapshot") unless sample.frozen?
+    exported.clear
+
+    expect(Ripr::R.probe.snapshot.fetch("samples").fetch(site)).to eq([%w[20 18]])
+  end
+
+  it "copies string operands even when the class name is overridden" do
+    allow(String).to receive(:name).and_return("RenamedString")
+    start_probe
+    left = +"20"
+    observe(left, +"18")
+    left.replace("edited operand")
+    expect(Ripr::R.probe.snapshot.fetch("samples").fetch(site)).to eq([%w[20 18]])
+  end
+
   it "stops checking operands after samples are full and the test has infected the mutation" do
     start_probe
     [18, 19, 20].each { |age| observe(age, 18) }
@@ -381,6 +520,42 @@ RSpec.describe "mutation runtime" do
     expect(Ripr::R.probe.snapshot.fetch("reach")).to have_key(site)
   end
 
+  it "probes each scalar variant independently without collecting samples" do
+    variants = { site => %w[equivalent changed] }
+    Ripr::R.configure(variants, samples: false)
+    Ripr::R.probe = Ripr::Probe.new(variants, samples: false)
+    Ripr::R.current_test = "test_variants"
+    calls = []
+    value = Ripr::R.bin(site, 20, 18) do |left, right, variant|
+      calls << variant
+      case variant
+      when 0 then left >= right
+      when 1 then left > right
+      when 2 then left == right
+      else raise "unexpected variant #{variant}"
+      end
+    end
+
+    expect(value).to be(true)
+    expect(calls).to eq([0, 1, 2])
+    expect(Ripr::R.probe.snapshot.fetch("infect")).to eq("changed" => ["test_variants"])
+    expect(Ripr::R.probe.snapshot.fetch("samples")).to be_empty
+  end
+
+  it "does not speculate with only one safe operand when sampling is disabled" do
+    start_probe(samples: false)
+    phases = []
+    unsafe = Object.new
+    value = Ripr::R.bin(site, 20, unsafe) do |_left, _right, variant|
+      phases << variant
+      :original
+    end
+
+    expect(value).to eq(:original)
+    expect(phases).to eq([0])
+    expect(Ripr::R.probe.snapshot.fetch("infect")).to eq("adult-boundary" => ["SampleTest#test_adult"])
+  end
+
   it "keeps unowned activity as load reach instead of assigning it to a test" do
     start_probe
     Ripr::R.current_test = nil
@@ -394,13 +569,20 @@ RSpec.describe "mutation runtime" do
     start_probe
     Ripr::R.probe = Ripr::Probe.new({})
     observe(18, 18)
+    Ripr::R.ret("other-return", :original)
+    Ripr::R.lit("other-literal", :original, :mutated)
+    Ripr::R.cond("other-condition", true)
+    Ripr::R.on?("other-statement")
     Ripr::R.current_test = nil
     observe(18, 18)
     Ripr::R.ret("other-return", nil)
+    Ripr::R.lit("other-literal", :original, :mutated)
+    Ripr::R.cond("other-condition", true)
     Ripr::R.on?("other-statement")
     snapshot = Ripr::R.probe.snapshot
     expect(snapshot.fetch("reach")).to be_empty
-    expect(snapshot.fetch("load_reached")).to eq([site, "other-return", "other-statement"])
+    expect(snapshot.fetch("load_reached")).to eq([site, "other-return", "other-literal", "other-condition", "other-statement"])
+    expect(snapshot.fetch("infect")).to be_empty
   end
 
   it "attributes concurrent tests independently" do
@@ -425,10 +607,16 @@ RSpec.describe "mutation runtime" do
   end
 
   it "exports all supported observations as JSON without calling arbitrary inspect" do
-    start_probe
-    [Rational(1, 2), :symbol, Float::INFINITY, Float::NAN].each do |value|
+    {
+      Rational(1, 2) => "1/2", Float::INFINITY => "Infinity",
+      -Float::INFINITY => "-Infinity", Float::NAN => "NaN"
+    }.each do |value, label|
+      start_probe
       Ripr::R.bin(site, value, value) { |l, r, k| k.zero? ? l == r : l != r }
+      snapshot = Ripr::R.probe.snapshot
+      expect(snapshot.fetch("samples").fetch(site)).to eq([[label, label]])
+      expect(JSON.parse(JSON.generate(snapshot))).to eq(snapshot)
     end
-    expect { JSON.generate(Ripr::R.probe.snapshot) }.not_to raise_error
+    expect(Ripr::Value.sample(:symbol)).to eq("symbol")
   end
 end
