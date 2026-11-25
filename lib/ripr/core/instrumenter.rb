@@ -1,10 +1,13 @@
 # frozen_string_literal: true
 
 require "prism"
+require_relative "operators"
 
 module Ripr
   module Core
     class Instrumenter
+      WRAP_ORDER = %i[binary literal connector condition removal return switch].freeze
+
       def self.call(source, path, sites)
         new(source, path, sites).call
       end
@@ -66,29 +69,27 @@ module Ripr
         end
         text << @source.byteslice(cursor, location.end_offset - cursor)
         sites = @by_node.fetch([location.start_offset, location.end_offset, node.type], [])
-        priority = %w[comparison arithmetic integer_literal boolean_literal boolean_connector condition_negation statement_removal
-                      return_nil]
-        sites.sort_by { |site| priority.index(site[:operator]) || priority.length }.each do |site|
-          text = wrap(site, node, text, rendered)
+        sites.sort_by { |site| WRAP_ORDER.index(Operators.fetch(site[:operator]).instrument_template) }.each do |site|
+          text = wrap(site, node, text, rendered, Operators.fetch(site[:operator]))
         end
         text
       end
 
-      def wrap(site, node, text, rendered)
+      def wrap(site, node, text, rendered, definition)
         @emitted << site[:key]
         key = site[:key].dump
-        case site[:operator]
-        when "comparison", "arithmetic"
-          binary(site, node, rendered)
-        when "integer_literal", "boolean_literal"
+        case definition.instrument_template
+        when :binary
+          binary(site, node, rendered, definition.comparator)
+        when :literal
           "::Ripr::R.lit(#{key},(#{text}),#{site[:variants].map { |v| v[:replacement] }.join(',')})"
-        when "condition_negation"
+        when :condition
           "::Ripr::R.cond(#{key},((#{text}) ? true : false))"
-        when "return_nil"
+        when :return
           "::Ripr::R.ret(#{key},(#{text}))"
-        when "statement_removal"
+        when :removal
           "(::Ripr::R.on?(#{key}) ? nil : (#{text}))"
-        when "boolean_connector"
+        when :connector
           left = rendered.fetch(node.left.node_id)
           right = rendered.fetch(node.right.node_id)
           replacement = site[:variants].first[:replacement]
@@ -98,7 +99,7 @@ module Ripr
         end
       end
 
-      def binary(site, node, rendered)
+      def binary(site, node, rendered, comparator)
         left = node.receiver
         right = node.arguments.arguments.first
         gap = @source.byteslice(left.location.end_offset, right.location.start_offset - left.location.end_offset).scan("\n").join
@@ -108,7 +109,7 @@ module Ripr
         (expressions.length - 2).downto(0) do |index|
           expression = "#{kvar} == #{index} ? #{lvar} #{expressions[index]} #{rvar} : (#{expression})"
         end
-        array_copy = ",true" if expressions.all? { |op| %w[+ -].include?(op) }
+        array_copy = ",true" if comparator == :native_array_copy && expressions.all? { |op| %w[+ -].include?(op) }
         "::Ripr::R.bin(#{site[:key].dump},(#{rendered.fetch(left.node_id)}),#{gap}(#{rewrite(right)}),#{site[:pure]}#{array_copy}) " \
           "{ |#{lvar},#{rvar},#{kvar}| #{expression} }"
       end

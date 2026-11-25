@@ -37,6 +37,57 @@ RSpec.describe "Core source analysis" do
     end
   end
 
+  it "uses one arithmetic definition for matching, mutation and native array-copy probing" do
+    operator = Ripr::Core::Operators.fetch("arithmetic")
+    node = Prism.parse("left + right").value.statements.body.first
+    explicit_call = Prism.parse("left.+(right)").value.statements.body.first
+
+    expect(operator.variants_for(node).map { |variant| variant.fetch(2) }).to eq(["-"])
+    expect(operator.variants_for(explicit_call)).to be_empty
+    expect(operator).to have_attributes(mode: "value", comparator: :native_array_copy, instrument_template: :binary)
+  end
+
+  it "evaluates the registered native infection condition on supported operands" do
+    operators = Ripr::Core::Operators
+    comparison = operators.fetch("comparison").infection_condition
+    arithmetic = operators.fetch("arithmetic").infection_condition
+    custom_value = Object.new
+    expect(custom_value).not_to receive(:+)
+
+    expect(comparison.call(20, 18, ">=")).to be(false)
+    expect(comparison.call(18, 18, ">=")).to be(true)
+    expect(arithmetic.call(1e20, 1.0, "+")).to be(false)
+    expect(arithmetic.call(8, 1, "+")).to be(true)
+    expect(arithmetic.call(8, 0, "/")).to be_nil
+    expect(arithmetic.call(8, 2, "**")).to be_nil
+    expect(arithmetic.call(custom_value, 1, "+")).to be_nil
+  end
+
+  it "limits the native array-copy probe to addition and subtraction" do
+    source = <<~RUBY
+      def value(left, right)
+        left + right
+        left * right
+        left == right
+      end
+    RUBY
+    result = instrument(source, analyze(source, operators: %w[arithmetic comparison]))
+    binaries = result.fetch(:code).lines.select { |line| line.include?("::Ripr::R.bin(") }
+
+    expect(binaries.map { |line| line.include?(",true,true)") }).to eq([true, false, false])
+  end
+
+  it "preserves contextual mutation identities for case conditions and returned values" do
+    source = "def choose(value); case value; when 1 then true; else false; end; end"
+    mutants = analyze(source, operators: %w[case_when return_nil]).fetch(:mutants)
+    expected = [
+      "lib/example.rb::Object#choose::body.body.0.conditions.0.conditions.0::case_when::->(*) { false }",
+      "lib/example.rb::Object#choose::body.return::return_nil::nil"
+    ]
+
+    expect(mutants.map { |mutant| mutant.fetch(:full_id) }).to eq(expected)
+  end
+
   it "removes duplicate and unchanged integer replacements" do
     { "0" => %w[1 -1], "1" => %w[2 0], "-1" => %w[0 -2], "9" => %w[10 8 0] }.each do |literal, replacements|
       result = analyze("def number; #{literal}; end", operators: ["integer_literal"])
