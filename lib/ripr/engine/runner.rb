@@ -12,6 +12,7 @@ require_relative "baseline_cache"
 require_relative "result_cache"
 require_relative "scheduler"
 require_relative "static_run"
+require_relative "worker_memory"
 require "pathname"
 require "tempfile"
 
@@ -104,20 +105,22 @@ module Ripr
           boot_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000
           load_reached = R.probe.snapshot.fetch("load_reached")
           R.probe = nil
-          @rails&.prepare_workers([@config[:jobs], observed.length].min)
+          worker_config = @config.with_worker_limit { WorkerMemory.limit }
+          @rails&.prepare_workers([worker_config[:jobs], observed.length].min)
           @profile&.phase("boot", started)
           baseline_started = @profile&.now
           @cache = ResultCache.new(@config, sources: @sources, test_files: @test_files, framework: @framework, mutants: @mutants,
                                             test_ids: adapter.tests.map { |test| test.fetch("id") }, probe_sites: probe_table.keys,
                                             graph: @call_graph, load_dependencies: @load_dependencies)
+          Process.warmup
           prepare_baseline(adapter, probe_table, load_reached)
           @profile&.phase("baseline", baseline_started)
           mutation_started = @profile&.now
           selected |= select_test_mutants(candidates, test_changes) unless test_changes.empty?
           selected = check_types(selected) if @config[:typecheck]
-          static_run = StaticRun.new(@config, @paths, boot_ms: boot_ms)
-          scheduler = Scheduler.new(@config, @baseline, @table, @cache, warnings: @warnings, metrics: @metrics,
-                                                                        rails: @rails, static_run: static_run, profile: @profile)
+          static_run = StaticRun.new(worker_config, @paths, boot_ms: boot_ms)
+          scheduler = Scheduler.new(worker_config, @baseline, @table, @cache, warnings: @warnings, metrics: @metrics,
+                                                                              rails: @rails, static_run: static_run, profile: @profile)
           results = scheduler.call(selected, adapter, &)
           @profile&.phase("mutation", mutation_started)
           @cache.write(results, @baseline, @metrics)

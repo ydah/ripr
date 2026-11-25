@@ -21,6 +21,22 @@ RSpec.describe Ripr::Config do
     expect { described_class.load({ seed: "bad" }) }.to raise_error(ArgumentError)
   end
 
+  it "limits automatic jobs to the smaller of the CPU and memory limits" do
+    allow(Etc).to receive(:nprocessors).and_return(8)
+    default = described_class.load({}, path: File::NULL)
+    automatic = described_class.load({ jobs: "auto" }, path: File::NULL)
+
+    expect(default.with_worker_limit { 3 }[:jobs]).to eq(3)
+    expect(automatic.with_worker_limit { 9 }[:jobs]).to eq(8)
+    expect(automatic.with_worker_limit { nil }[:jobs]).to eq(8)
+  end
+
+  it "keeps an explicit job count without querying the worker limit" do
+    config = described_class.load({ jobs: 4 }, path: File::NULL)
+
+    expect(config.with_worker_limit { raise "unexpected worker limit query" }[:jobs]).to eq(4)
+  end
+
   it "uses isolated Rails boot for an explicit boot file in a conventional Rails project" do
     Dir.mktmpdir("ripr-rails-config") do |dir|
       Dir.chdir(dir) do

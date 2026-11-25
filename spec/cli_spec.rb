@@ -86,6 +86,39 @@ RSpec.describe "ripr command" do
     end
   end
 
+  it "accepts automatic workers on the command line" do
+    _, stderr, status = command("--jobs", "auto", "--full")
+    expect(status.exitstatus).to eq(0), stderr
+  end
+
+  it "warms the loaded test process before forking workers" do
+    Dir.mktmpdir("ripr-warmup") do |dir|
+      FileUtils.cp_r(File.join(fixture, "."), dir)
+      File.write(File.join(dir, "test/warmup_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+
+        Process.singleton_class.prepend(Module.new do
+          def warmup
+            File.write("warmed.txt", Process.pid)
+            super
+          end
+        end)
+
+        class WarmupTest < Minitest::Test
+          def test_forked_from_warmed_parent
+            assert File.file?("warmed.txt"), "parent did not warm up"
+            assert_equal Process.ppid, File.read("warmed.txt").to_i
+            assert Sample.adult?(20)
+          end
+        end
+      RUBY
+
+      _, stderr, status = command("--full", "--jobs", "1", "--tests", "test/warmup_test.rb", directory: dir)
+      expect(status.exitstatus).to eq(0), stderr
+    end
+  end
+
   it "returns quality gate and baseline failure exit codes" do
     _, _, status = command("--fail-on-survived", "--full")
     expect(status.exitstatus).to eq(2)

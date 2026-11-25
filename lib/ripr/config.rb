@@ -10,7 +10,7 @@ module Ripr
                    boot rails static typecheck].freeze
     DEFAULTS = {
       include: ["lib/**/*.rb"], exclude: ["lib/**/version.rb"], framework: "auto", tests: nil,
-      scope: "node", jobs: Etc.nprocessors, operators: Core::Operators::NAMES,
+      scope: "node", jobs: "auto", operators: Core::Operators::NAMES,
       arid_callees: %w[logger.* puts pp warn], thresholds: { "high" => 80, "low" => 60, "break" => nil },
       timeout: { "factor" => 2.0, "base_ms" => 1000 }, samples: true,
       reporters: ["text"], report_dir: ".ripr/report", since: nil, only: [], full: false,
@@ -43,7 +43,8 @@ module Ripr
 
     def initialize(values)
       @values = values
-      @values[:jobs] = Etc.nprocessors if @values[:jobs] == "auto"
+      @automatic_jobs = @values[:jobs] == "auto"
+      @values[:jobs] = Etc.nprocessors if @automatic_jobs
       @values[:operators] = Core::Operators::NAMES if @values[:operators] == "default"
       @values[:operators] = Core::Operators::FULL_NAMES if @values[:operators] == "full"
       validate
@@ -57,12 +58,19 @@ module Ripr
       @values.dup
     end
 
+    def with_worker_limit
+      return self unless @automatic_jobs
+
+      limit = yield
+      limit && limit < self[:jobs] ? self.class.new(@values.merge(jobs: limit)) : self
+    end
+
     private
 
     def validate
       raise ArgumentError, "framework must be auto, minitest, or rspec" unless %w[auto minitest rspec].include?(self[:framework])
       raise ArgumentError, "scope must be node or method" unless %w[node method].include?(self[:scope])
-      raise ArgumentError, "jobs must be a positive integer" unless self[:jobs].is_a?(Integer) && self[:jobs].positive?
+      raise ArgumentError, "jobs must be auto or a positive integer" unless self[:jobs].is_a?(Integer) && self[:jobs].positive?
       raise ArgumentError, "seed must be an integer" unless self[:seed].is_a?(Integer)
 
       %i[include exclude arid_callees operators reporters only].each do |key|

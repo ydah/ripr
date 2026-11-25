@@ -56,7 +56,7 @@ module Ripr
         options.on("--scope SCOPE") { |v| @overrides[:scope] = v }
         options.on("--framework FRAMEWORK") { |v| @overrides[:framework] = v }
         options.on("--tests GLOB") { |v| (@overrides[:tests] ||= []) << v }
-        options.on("-j", "--jobs N", Integer) { |v| @overrides[:jobs] = v }
+        options.on("-j", "--jobs N|auto") { |v| @overrides[:jobs] = Integer(v, exception: false) || v }
         options.on("--operators LIST") { |v| @overrides[:operators] = %w[default full].include?(v) ? v : v.split(",") }
         options.on("--reporter NAME") { |v| (@overrides[:reporters] ||= []) << v }
         options.on("--report-dir DIR") { |v| @overrides[:report_dir] = v }

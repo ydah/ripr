@@ -47,6 +47,27 @@ RSpec.describe "incremental ripr commands" do
     JSON.parse(File.read(File.join(directory, ".ripr/snapshot.json")))
   end
 
+  it "reuses cached results when the automatic memory limit changes" do
+    with_project do |directory|
+      worker_memory = File.expand_path("../lib/ripr/engine/worker_memory.rb", __dir__)
+      stub = File.join(directory, "worker_limit.rb")
+      File.write(stub, <<~RUBY)
+        require "etc"
+        require #{worker_memory.dump}
+        Etc.define_singleton_method(:nprocessors) { 4 }
+        Ripr::Engine::WorkerMemory.define_singleton_method(:limit) { Integer(ENV.fetch("TEST_WORKER_LIMIT")) }
+      RUBY
+
+      %w[1 2].each do |limit|
+        _, error, status = Open3.capture3({ "TEST_WORKER_LIMIT" => limit }, RbConfig.ruby, "-r", stub, executable,
+                                          "--jobs", "auto", "--operators", "comparison", chdir: directory)
+        expect(status.exitstatus).to eq(0), error
+      end
+
+      expect(snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 0, "reused" => 1)
+    end
+  end
+
   %w[load_iseq require].each do |mode|
     it "rejects source preloaded without instrumentation using #{mode}" do
       with_project do |directory|
