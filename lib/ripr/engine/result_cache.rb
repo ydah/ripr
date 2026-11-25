@@ -15,7 +15,8 @@ module Ripr
         @config = config
         @method_hashes = method_hashes
         @snapshot = Snapshot.new
-        @previous = config[:full] || config[:boot] || config[:rails] ? {} : @snapshot.read
+        @repeated_baseline = (config[:baseline_runs] || 1) > 1
+        @previous = config[:full] || config[:boot] || config[:rails] || @repeated_baseline ? {} : @snapshot.read
         @source_hash = digest(sources.sort.to_h.transform_values { |source| Digest::SHA256.hexdigest(source) })
         @test_hashes = test_files.sort.to_h { |path| [path, Digest::SHA256.file(path).hexdigest] }
         lockfiles = %w[Gemfile.lock .rspec .rspec-local]
@@ -72,6 +73,8 @@ module Ripr
       end
 
       def write(results, baseline, metrics)
+        return if @repeated_baseline
+
         records = @previous.fetch("mutants", {}).select do |id, record|
           method_hash = @method_hashes[id]
           method_hash && valid_record?(record) && record["env_hash"] == @env_hash && record["method_hash"] == method_hash

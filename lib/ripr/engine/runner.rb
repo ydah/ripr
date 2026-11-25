@@ -133,6 +133,7 @@ module Ripr
 
       def prepare_call_graph
         return unless @config[:call_graph_reuse] && !(@config[:boot] || @config[:rails] || @config[:static] || @config[:verify_killed])
+        return if @config[:baseline_runs] > 1
 
         require_relative "../core/call_graph"
         @call_graph = Core::CallGraph.new(@sources)
@@ -145,7 +146,11 @@ module Ripr
           boot_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000
           load_reached = R.probe.snapshot.fetch("load_reached")
           R.probe = nil
-          worker_config = @config.with_worker_limit { WorkerMemory.limit }
+          worker_config = if @rails && @config[:baseline_runs] > 1
+                            Config.new(@config.to_h.merge(jobs: 1))
+                          else
+                            @config.with_worker_limit { WorkerMemory.limit }
+                          end
           @rails&.prepare_workers([worker_config[:jobs], selection.observed.length].min)
           @profile&.phase("boot", started)
           baseline_started = @profile&.now
@@ -316,8 +321,11 @@ module Ripr
         raise ArgumentError, "no test files found" if files.empty?
 
         require_relative "../integration/#{@framework}"
-        klass = @framework == "rspec" ? Integration::RSpec : Integration::Minitest
-        adapter = klass.new(files, seed: @config[:seed])
+        adapter = if @framework == "rspec"
+                    Integration::RSpec.new(files, seed: @config[:seed], seed_random: @config[:baseline_runs] > 1)
+                  else
+                    Integration::Minitest.new(files, seed: @config[:seed])
+                  end
         capture_load_output do
           if @call_graph
             _, @load_dependencies = @call_graph.trace { adapter.load }
@@ -356,18 +364,15 @@ module Ripr
         cache = BaselineCache.new(@cache.previous["baseline"], env_hash: @cache.baseline_env_hash,
                                                                source_hash: @cache.source_hash, test_hashes: @cache.test_hashes,
                                                                tests: tests, full: @config[:full])
-        fresh = unless cache.test_ids == []
-                  Child.call(timeout_ms: 60_000 + (@rails&.worker_timeout_ms || 0)) do
-                    probe = Probe.new(probe_table, samples: @config[:samples])
-                    R.probe = probe
-                    result = if @rails
-                               @rails.with_worker(0) { adapter.run(cache.test_ids) }
-                             else
-                               adapter.run(cache.test_ids)
-                             end
-                    result.merge("probe" => probe.snapshot)
-                  end
-                end
+        if @config[:baseline_runs] > 1
+          require_relative "baseline_stability"
+          stability = BaselineStability.new(@config[:baseline_runs], @warnings)
+          fresh = stability.call { |ids| observe_baseline(adapter, probe_table, ids, record_outcomes: true) }
+          @metrics["baseline_tests_run"] = stability.attempted_tests
+        elsif cache.test_ids != []
+          fresh = observe_baseline(adapter, probe_table, cache.test_ids)
+          @metrics["baseline_tests_run"] = fresh.fetch("tests").length if fresh["success"]
+        end
         if fresh && !fresh["success"]
           failures = fresh["failures"] || [fresh["error"] || fresh["status"]]
           messages = failures.map { |failure| failure.is_a?(Hash) ? failure["message"] : failure }
@@ -376,7 +381,17 @@ module Ripr
         fresh&.fetch("tests")&.each_value { |test| test["file"] = relative(test.fetch("file")) }
         @baseline = cache.combine(fresh, load_reached: load_reached)
         @metrics["baseline_reused"] = cache.reused_count.positive?
-        @metrics["baseline_tests_run"] = fresh ? fresh.fetch("tests").length : 0
+      end
+
+      def observe_baseline(adapter, probe_table, ids, record_outcomes: false)
+        Child.call(timeout_ms: 60_000 + (@rails&.worker_timeout_ms || 0)) do
+          probe = Probe.new(probe_table, samples: @config[:samples])
+          R.probe = probe
+          run = -> { adapter.run(ids, record_outcomes:) }
+          run_tests = -> { record_outcomes ? BaselineStability.capture(&run) : run.call }
+          result = @rails ? @rails.with_worker(0, &run_tests) : run_tests.call
+          result.merge("probe" => probe.snapshot)
+        end
       end
 
       def relative(path)

@@ -65,6 +65,7 @@ module Ripr
         options.on("--timeout-factor F", Float) { |v| (@overrides[:timeout] ||= {})["factor"] = v }
         options.on("--timeout-base MS", Float) { |v| (@overrides[:timeout] ||= {})["base_ms"] = v }
         options.on("--seed N", Integer) { |v| @overrides[:seed] = v }
+        options.on("--baseline-runs N", Integer, "Repeat the baseline to detect unstable tests") { |v| @overrides[:baseline_runs] = v }
         options.on("--no-samples") { @overrides[:samples] = false }
         options.on("--boot FILE") { |v| @overrides[:boot] = v }
         options.on("--typecheck CHECKER") { |v| @overrides[:typecheck] = v }

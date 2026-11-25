@@ -121,6 +121,7 @@ jobs: auto
 Use `bundle exec ripr --help` for CLI options and `bundle exec ripr list operators` for available mutations. CLI flags override file settings. Ignore `.ripr/` in Git. Use `--full` to bypass cached results, especially after changing external test data or environment variables.
 
 - `--jobs auto` uses the CPU count and caps it using available memory after boot on Linux and macOS. Pass `--jobs N` to use a fixed worker count.
+- `--baseline-runs 2` repeats the baseline to detect changes in test outcomes, mutation reach, or infection. Ripr warns about unstable tests and validates the remaining tests before running mutations. Warnings list observed clock or random calls as clues. This mode bypasses the cache and verifies kills on the original code. Rails uses one worker to keep the test database and worker identity consistent.
 - `--operators full` adds string, regexp, collection, safe-navigation, compound assignment, and `case` mutations. `--full` controls the execution scope.
 - `--static` includes supported load-time mutations. ripr starts a fresh process with each mutation already active. A failure while loading the application is an execution error.
 - `--call-graph-reuse` can retain results across method-body edits if the current baseline observations and the previously executed dependencies still match. It reruns the baseline after a source change and falls back to ordinary invalidation when dependency tracking is incomplete.

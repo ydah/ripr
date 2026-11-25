@@ -15,7 +15,7 @@ module Ripr
       timeout: { "factor" => 2.0, "base_ms" => 1000 }, samples: true,
       reporters: ["text"], report_dir: ".ripr/report", since: nil, only: [], full: false,
       dry_run: false, fail_on_survived: false, verify_not_infected: false, verify_killed: false, seed: 0, boot: nil, rails: false,
-      include_tests_diff: false, static: false, call_graph_reuse: false, typecheck: nil, profile: false
+      include_tests_diff: false, static: false, call_graph_reuse: false, typecheck: nil, profile: false, baseline_runs: 1
     }.freeze
 
     def self.load(overrides = {}, path: ".ripr.yml")
@@ -72,6 +72,9 @@ module Ripr
       raise ArgumentError, "scope must be node or method" unless %w[node method].include?(self[:scope])
       raise ArgumentError, "jobs must be auto or a positive integer" unless self[:jobs].is_a?(Integer) && self[:jobs].positive?
       raise ArgumentError, "seed must be an integer" unless self[:seed].is_a?(Integer)
+      unless self[:baseline_runs].is_a?(Integer) && self[:baseline_runs].positive?
+        raise ArgumentError, "baseline-runs must be a positive integer"
+      end
 
       %i[include exclude arid_callees operators reporters only].each do |key|
         raise ArgumentError, "#{key} must be a list of strings" unless self[key].is_a?(Array) && self[key].all?(String)
