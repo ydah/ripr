@@ -74,6 +74,10 @@
         "priority": {"type": "integer", "minimum": 0, "maximum": 4},
         "action": {"enum": ["add_test", "add_input", "strengthen_assertion"]},
         "hint": {"type": "string"},
+        "equivalence_suspected": {
+          "const": true,
+          "description": "Observed method exits matched the original in at least three distinct covering tests. Side effects require review."
+        },
         "load_reached": {"type": "boolean"},
         "location": {
           "type": "object",
@@ -113,7 +117,11 @@
         {"if": {"properties": {"stage": {"const": "not_reached"}}}, "then": {"properties": {"action": {"const": "add_test"}}}},
         {"if": {"properties": {"stage": {"enum": ["not_infected", "not_propagated"]}}}, "then": {"properties": {"action": {"const": "add_input"}}}},
         {"if": {"properties": {"stage": {"enum": ["not_revealed", "not_detected"]}}}, "then": {"properties": {"action": {"const": "strengthen_assertion"}}}},
-        {"if": {"properties": {"stage": {"const": "not_revealed"}}}, "then": {"required": ["propagation"]}}
+        {"if": {"properties": {"stage": {"const": "not_revealed"}}}, "then": {"required": ["propagation"]}},
+        {
+          "if": {"required": ["equivalence_suspected"]},
+          "then": {"properties": {"stage": {"const": "not_propagated"}, "covering_tests": {"minItems": 3}}}
+        }
       ]
     }
   }
