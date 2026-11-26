@@ -122,6 +122,49 @@ end
 RSpec.describe "verification of probe verdicts" do
   let(:executable) { File.expand_path("../exe/ripr", __dir__) }
 
+  it "preserves a crashed worker's error without replaying it as a killed mutation" do
+    Dir.mktmpdir("ripr-worker-verdict") do |directory|
+      FileUtils.mkdir_p(%w[lib test].map { |path| File.join(directory, path) })
+      File.write(File.join(directory, "lib/sample.rb"), <<~RUBY)
+        module Sample
+          def self.crash?(age) = age >= 18
+          def self.boundary?(age) = age >= 18
+        end
+      RUBY
+      File.write(File.join(directory, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+
+        class SampleTest < Minitest::Test
+          def test_crash
+            File.open("crash-tests", "a") { |file| file.puts "run" }
+            exit! 23 unless Sample.crash?(18)
+            assert true
+          end
+
+          def test_boundary
+            assert Sample.boundary?(18)
+          end
+        end
+      RUBY
+
+      output, error, status = Open3.capture3(RbConfig.ruby, executable, "--jobs", "1", "--operators", "comparison",
+                                             "--reporter", "agent", "--verify-killed", chdir: directory)
+      expect(status).to be_success, error
+      expect(JSON.parse(output).fetch("summary")).to include("error" => 1, "killed" => 1)
+      snapshot = JSON.parse(File.read(File.join(directory, ".ripr/snapshot.json")))
+      results = snapshot.fetch("mutants").values.to_h { |mutant| [mutant.fetch("subject"), mutant] }
+      expect(results.fetch("Sample.crash?")).to include(
+        "status" => "error", "killed_by" => nil, "error" => "child exited without a valid result"
+      )
+      expect(results.fetch("Sample.boundary?")).to include(
+        "status" => "killed", "killed_by" => "SampleTest#test_boundary", "error" => nil
+      )
+      expect(File.readlines(File.join(directory, "crash-tests"), chomp: true)).to eq(%w[run run])
+      expect(error).not_to include("could not verify kill")
+    end
+  end
+
   it "keeps verified non-infection and reports a discrepancy when replay kills a mutant" do
     Dir.mktmpdir("ripr-verify-probe") do |directory|
       FileUtils.mkdir_p(File.join(directory, "lib"))
