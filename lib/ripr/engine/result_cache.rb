@@ -36,7 +36,7 @@ module Ripr
         settings = config.to_h.slice(:operators, :arid_callees, :tests, :samples, :seed, :static)
         context = [VERSION, RUBY_ENGINE, RUBY_VERSION, RUBY_PLATFORM, Dir.pwd, Prism::VERSION, framework,
                    settings, dependencies, probe_sites.sort, ENV.fetch("RIPR_LOADER", nil), ENV.fetch("SPEC_OPTS", nil)]
-        context << boot_digest if booted
+        context << boot_digest if booted && !shared_baseline
         execution = [@test_hashes, test_ids.sort, config[:timeout], config[:jobs],
                      config[:verify_not_infected], config[:verify_killed], config[:call_graph_reuse], config[:typecheck]]
         @baseline_env_hash = digest([context, @source_hash])
