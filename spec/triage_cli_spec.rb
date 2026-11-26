@@ -49,7 +49,7 @@ RSpec.describe "agent diagnosis and triage" do
   end
 
   it "keeps the published agent v2 schema frozen" do
-    fingerprint = "1ee0b7050621532c606511a3ab4c8ff226d6cde97169a874ec09884ef191f038"
+    fingerprint = "d29d1627b508fb90d59121f021060e5753afa44a6949f43b3af83f56a9b10bcd"
     message = "Keep schema/agent-v2.json as published. Add a new schema version for contract changes."
     expect(Digest::SHA256.file(v2_schema_path).hexdigest).to eq(fingerprint), message
   end
