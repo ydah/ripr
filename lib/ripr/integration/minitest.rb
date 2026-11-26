@@ -38,12 +38,13 @@ module Ripr
         end
       end
 
-      def run(ids = nil, fail_fast: false)
+      def run(ids = nil, fail_fast: false, record_outcomes: false)
         ids ||= @cases.keys.sort
         unknown = ids.reject { |id| @cases.key?(id) }
         raise ArgumentError, "unknown test IDs: #{unknown.join(', ')}" unless unknown.empty?
 
         result = { "success" => !ids.empty?, "tests" => {}, "failures" => [] }
+        outcomes = result["outcomes"] = {} if record_outcomes
         result["failures"] << { "message" => "No tests selected" } if ids.empty?
         srand(@seed)
         ids.each do |id|
@@ -57,6 +58,7 @@ module Ripr
                  end
           duration = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000
           result["tests"][id] = { "file" => file.dup, "line" => line, "duration_ms" => duration }
+          outcomes[id] = outcome(test) if outcomes
           next if test.passed? || test.skipped?
 
           result["success"] = false
@@ -66,6 +68,14 @@ module Ripr
           R.current_test = nil
         end
         result
+      end
+
+      private
+
+      def outcome(test)
+        return "pending" if test.skipped?
+
+        test.passed? ? "passed" : "failed"
       end
     end
   end

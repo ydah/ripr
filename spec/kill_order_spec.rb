@@ -118,3 +118,53 @@ RSpec.describe "historical mutation test ordering" do
     end
   end
 end
+
+RSpec.describe "verification of probe verdicts" do
+  let(:executable) { File.expand_path("../exe/ripr", __dir__) }
+
+  it "keeps verified non-infection and reports a discrepancy when replay kills a mutant" do
+    Dir.mktmpdir("ripr-verify-probe") do |directory|
+      FileUtils.mkdir_p(File.join(directory, "lib"))
+      FileUtils.mkdir_p(File.join(directory, "test"))
+      File.write(File.join(directory, "lib/sample.rb"), <<~RUBY)
+        module Sample
+          def self.stable?(age) = age >= 18
+          def self.stateful?(age) = age >= 18
+          def self.uncovered?(age) = age >= 18
+        end
+      RUBY
+      File.write(File.join(directory, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+
+        class SampleTest < Minitest::Test
+          def test_stable
+            assert Sample.stable?(19)
+          end
+
+          def test_stateful
+            age = File.exist?("external-state") ? 18 : 19
+            File.write("external-state", "baseline ran")
+            assert Sample.stateful?(age)
+          end
+        end
+      RUBY
+
+      output, error, status = Open3.capture3(RbConfig.ruby, executable, "--jobs", "1", "--operators", "comparison", "--reporter",
+                                             "agent", "--verify-not-infected", chdir: directory)
+      expect(status).to be_success, error
+      expect(JSON.parse(output).fetch("summary")).to include("not_infected" => 1, "not_reached" => 1, "killed" => 1)
+      snapshot = JSON.parse(File.read(File.join(directory, ".ripr/snapshot.json")))
+      mutations = snapshot.fetch("mutants").values.to_h { |mutant| [mutant.fetch("subject"), mutant] }
+      expect(mutations.fetch("Sample.stable?")).to include("status" => "not_infected", "verified" => true)
+      uncovered = mutations.fetch("Sample.uncovered?")
+      expect(uncovered).to include("status" => "not_reached")
+      expect(uncovered).not_to have_key("verified")
+      killed = mutations.fetch("Sample.stateful?")
+      expect(killed).to include("status" => "killed", "verified" => true, "killed_by" => "SampleTest#test_stateful")
+      expect(error.lines.grep(/verification discrepancy/).map(&:chomp)).to eq(
+        ["ripr: verification discrepancy #{killed.fetch('id')}: expected not_infected, got killed"]
+      )
+    end
+  end
+end

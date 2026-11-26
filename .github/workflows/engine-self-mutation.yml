@@ -9,9 +9,13 @@ permissions:
   contents: read
 
 jobs:
-  engine:
+  shard:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        index: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -21,10 +25,43 @@ jobs:
           ruby-version: '4.0'
           bundler-cache: true
       - name: Measure Engine and Runtime mutation coverage
+        env:
+          SHARD: ${{ format('{0}/{1}', matrix.index, strategy.job-total) }}
         run: |
-          bundle exec ruby script/self_mutate_engine.rb --jobs 4 --timeout-seconds 120 > engine-mutations.json
+          bundle exec ruby script/self_mutate_engine.rb --jobs 4 --timeout-seconds 120 --shard "$SHARD" > engine-shard.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: engine-shard-${{ matrix.index }}
+          path: engine-shard.json
+          if-no-files-found: error
+          overwrite: true
+
+  engine:
+    needs: shard
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all shards to succeed
+        if: needs.shard.result != 'success'
+        run: exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        with:
+          ruby-version: '4.0'
+          bundler-cache: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: engine-shard-*
+          path: engine-shards
+      - name: Combine Engine and Runtime mutation coverage
+        run: |
+          bundle exec ruby script/self_mutate_engine.rb --merge engine-shards/engine-shard-*/engine-shard.json > engine-mutations.json
           jq '.summary' engine-mutations.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: engine-mutations
           path: engine-mutations.json
+          if-no-files-found: error
+          overwrite: true

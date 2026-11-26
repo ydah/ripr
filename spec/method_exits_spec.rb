@@ -345,18 +345,59 @@ RSpec.describe Ripr::Engine::MethodExits do
     expect(result.fetch("propagation")).to include("call" => 2, "original" => ["not_called"], "mutant" => returned(1))
   end
 
-  it "keeps observations immutable and abandons a subject that exceeds the call budget" do
+  it "keeps observations immutable" do
     instance = subject_class.new
     targets = { "Sample#compute" => instance.method(:compute) }
     _, observations = described_class.observe(targets) { as_test("small") { instance.compute([+"entry"]) } }
     expect(observations).to be_frozen
     expect(observations.fetch("Sample#compute")).to be_frozen
     expect(observations.fetch("Sample#compute").fetch("small")).to be_frozen
+  end
+
+  it "keeps every exit at the per-test call limit and drops the subject on the next call" do
+    instance = subject_class.new
+    targets = { "Sample#compute" => instance.method(:compute) }
+    _, observations = described_class.observe(targets) do
+      as_test("test") { 32.times { instance.compute(false) } }
+    end
+    expect(observations).to eq("Sample#compute" => { "test" => Array.new(32, returned(false)) })
 
     _, overflow = described_class.observe(targets) do
-      as_test("large") { (described_class::MAX_CALLS_PER_TEST + 1).times { instance.compute(false) } }
+      as_test("test") { 33.times { instance.compute(false) } }
     end
     expect(overflow).to eq("Sample#compute" => nil)
+  end
+
+  it "drops a subject when its calls across tests exceed the per-subject limit" do
+    instance = subject_class.new
+    targets = { "Sample#compute" => instance.method(:compute) }
+    _, overflow = described_class.observe(targets) do
+      8.times { |test| as_test("test #{test}") { 32.times { instance.compute(false) } } }
+      as_test("one more test") { instance.compute(false) }
+    end
+    expect(overflow).to eq("Sample#compute" => nil)
+  end
+
+  it "preserves exits from subjects within the total call limit when a later subject exceeds it" do
+    instances = Array.new(17) do
+      klass = Class.new do
+        def compute(value)
+          value
+        end
+      end
+      klass.new
+    end
+    targets = instances.each_with_index.to_h { |instance, index| ["Subject#{index}", instance.method(:compute)] }
+
+    _, observations = described_class.observe(targets) do
+      instances.first(16).each do |instance|
+        8.times { |test| as_test("test #{test}") { 32.times { instance.compute(false) } } }
+      end
+      as_test("one more test") { instances.last.compute(false) }
+    end
+
+    exits_by_test = (0...8).to_h { |test| ["test #{test}", Array.new(32, returned(false))] }
+    expect(observations).to eq((0...16).to_h { |index| ["Subject#{index}", exits_by_test] }.merge("Subject16" => nil))
   end
 
   it "traces a method compiled by the instrumenting loader in the baseline and its fork" do
