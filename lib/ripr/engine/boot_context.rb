@@ -228,7 +228,7 @@ module Ripr
         return true if project_path?(path) || path.start_with?(*@runtime_prefixes)
         return false unless defined?(Gem)
 
-        Gem.loaded_specs.each_value.any? { |spec| path.start_with?("#{spec.full_gem_path}/", "#{spec.extension_dir}/") }
+        Gem.loaded_specs.each_value.any? { |spec| spec.full_require_paths.any? { |root| path.start_with?("#{root}/") } }
       end
 
       def input_files(boot, features)
