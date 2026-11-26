@@ -9,13 +9,18 @@ require_relative "../core/reuse_planner"
 module Ripr
   module Engine
     class ResultCache
-      attr_reader :baseline_env_hash, :source_hash, :test_hashes, :previous, :graph
+      attr_reader :env_hash, :baseline_env_hash, :source_hash, :test_hashes, :previous, :graph
 
-      def initialize(config, sources:, test_files:, framework:, method_hashes:, test_ids:, probe_sites:, graph: nil, load_dependencies: nil)
+      def initialize(config, sources:, test_files:, framework:, method_hashes:, test_ids:, probe_sites:, graph: nil, load_dependencies: nil,
+                     shared_baseline: false, environment_hash: nil, boot_digest: nil)
         @config = config
         @method_hashes = method_hashes
         @snapshot = Snapshot.new
-        @previous = config[:full] || config[:boot] || config[:rails] ? {} : @snapshot.read
+        @repeated_baseline = (config[:baseline_runs] || 1) > 1
+        booted = config[:boot] || config[:rails]
+        cacheable = !booted || (boot_digest && !shared_baseline)
+        @previous = config[:full] || !cacheable || shared_baseline || @repeated_baseline ? {} : @snapshot.read
+        @previous = {} if @previous.key?("shard_inputs") && !matching_shard_inputs?(@previous["shard_inputs"], environment_hash)
         @source_hash = digest(sources.sort.to_h.transform_values { |source| Digest::SHA256.hexdigest(source) })
         @test_hashes = test_files.sort.to_h { |path| [path, Digest::SHA256.file(path).hexdigest] }
         lockfiles = %w[Gemfile.lock .rspec .rspec-local]
@@ -31,11 +36,12 @@ module Ripr
         settings = config.to_h.slice(:operators, :arid_callees, :tests, :samples, :seed, :static)
         context = [VERSION, RUBY_ENGINE, RUBY_VERSION, RUBY_PLATFORM, Dir.pwd, Prism::VERSION, framework,
                    settings, dependencies, probe_sites.sort, ENV.fetch("RIPR_LOADER", nil), ENV.fetch("SPEC_OPTS", nil)]
+        context << boot_digest if booted && !shared_baseline
         execution = [@test_hashes, test_ids.sort, config[:timeout], config[:jobs],
                      config[:verify_not_infected], config[:verify_killed], config[:call_graph_reuse], config[:typecheck]]
         @baseline_env_hash = digest([context, @source_hash])
         @env_hash = digest([@baseline_env_hash, execution])
-        if graph&.structure_hash && (load_signature = graph.signature(load_dependencies))
+        if cacheable && graph&.structure_hash && (load_signature = graph.signature(load_dependencies))
           @graph = graph
           @graph_context = digest([context, execution, graph.structure_hash, load_signature.sort])
         end
@@ -72,24 +78,50 @@ module Ripr
       end
 
       def write(results, baseline, metrics)
+        return if @repeated_baseline
+
         records = @previous.fetch("mutants", {}).select do |id, record|
           method_hash = @method_hashes[id]
           method_hash && valid_record?(record) && record["env_hash"] == @env_hash && record["method_hash"] == method_hash
         end
         results.each do |result|
-          files = result.fetch("covering_tests", []).map { |test| test.fetch("file") }
-          record = result.merge("env_hash" => @env_hash, "tests" => @test_hashes.slice(*files), "recorded_at" => Time.now.utc.iso8601)
+          record = self.class.snapshot_record(result, @env_hash, @test_hashes)
           if @graph && result["dependency_hashes"]
             record["graph_context"] = @graph_context
             record["observation_hash"] = observation_hash(result, baseline.fetch("probe"))
           end
           records[result.fetch("full_id")] = record
         end
-        @snapshot.write("version" => Snapshot::VERSION, "env_hash" => @env_hash, "source_hash" => @source_hash,
-                        "test_hashes" => @test_hashes, "mutants" => records, "baseline" => baseline, "metrics" => metrics)
+        snapshot = @previous.slice("shard_inputs").merge("version" => Snapshot::VERSION, "env_hash" => @env_hash,
+                                                         "source_hash" => @source_hash, "test_hashes" => @test_hashes,
+                                                         "mutants" => records, "baseline" => baseline, "metrics" => metrics)
+        @snapshot.write(snapshot)
+      end
+
+      def self.write_merged(context, results, baseline, metrics, inputs:)
+        env_hash, test_hashes = context.values_at("env_hash", "test_hashes")
+        records = results.to_h { |result| [result.fetch("full_id"), snapshot_record(result, env_hash, test_hashes)] }
+        data = context.slice("env_hash", "source_hash", "test_hashes")
+        Snapshot.new.write(data.merge("version" => Snapshot::VERSION, "mutants" => records, "baseline" => baseline,
+                                      "metrics" => metrics, "shard_inputs" => inputs))
+      end
+
+      def self.snapshot_record(result, env_hash, test_hashes)
+        files = result.fetch("covering_tests", []).map { |test| test.fetch("file") }
+        result.merge("env_hash" => env_hash, "tests" => test_hashes.slice(*files), "recorded_at" => Time.now.utc.iso8601)
       end
 
       private
+
+      def matching_shard_inputs?(inputs, environment_hash)
+        return false unless inputs.is_a?(Hash) && inputs["environment"] == environment_hash && inputs["files"].is_a?(Hash)
+
+        require_relative "shard_plan"
+        files = inputs.fetch("files")
+        ShardPlan.feature_inputs(files.keys) == files
+      rescue SystemCallError, IOError
+        false
+      end
 
       def kill_history(tests)
         baseline = @previous["baseline"]

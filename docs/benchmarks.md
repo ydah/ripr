@@ -50,6 +50,12 @@ At [`f17f988`](https://github.com/ydah/ripr/commit/f17f988) on Ruby 4.0.9, `bund
 
 Seven paired runs on PostgreSQL 14 compared creating an empty worker database and restoring a dump against cloning the same snapshot as a template. Median worker setup fell from 77 to 62 ms for a 9.9 MB database with 2,000 rows and from 167 to 70 ms for a 22.2 MB database with 60,000 rows. Both produced the same data and schema checksums. Preparing the template adds one copy per ripr run.
 
+### Compiler equivalence
+
+On CRuby 3.3.12 and 4.0.9, all 695 valid dynamic variants from the four pinned files compiled with the full operator profile. No two variants shared the same normalized bytecode, and none matched the original. Both compilers detected a dead-branch control. The comparison retains instructions, operands, and line information and drops compiler node IDs and source columns.
+
+Run `bundle exec ruby script/measure_tce.rb FILE ...` on the four files above to reproduce the counts. This measurement covers bytecode identity. Ripr uses test observations to report whether a mutation changes a method's behavior.
+
 ## Reproduce
 
 Use Ruby 4.0.10, Bundler, Git, curl, tar, and the Fizzy system libraries listed in the [benchmark workflow](../.github/workflows/benchmark.yml). The runner downloads the archived revisions into temporary directories, installs dependencies, and writes wall-time samples, mutation counts, and ripr profiles to JSON.
