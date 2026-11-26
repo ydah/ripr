@@ -61,6 +61,13 @@ RSpec.describe Ripr::Core::CallGraph do
     expect(graph(code.sub("first = 2", "first = 200")).structure_hash).not_to eq(current.structure_hash)
   end
 
+  it "includes class-body closures in the structure hash" do
+    code = "class Example; CALLBACK = -> { 7 }; HANDLER = proc { 8 }; end"
+    current = graph(code)
+    expect(graph(code.sub("7", "9")).structure_hash).not_to eq(current.structure_hash)
+    expect(graph(code.sub("8", "9")).structure_hash).not_to eq(current.structure_hash)
+  end
+
   it "records dependencies when Ruby loads a configured source through its real path" do
     code = "class Sample\n#{source}end\n"
     Dir.mktmpdir do |directory|
