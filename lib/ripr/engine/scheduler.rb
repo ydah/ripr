@@ -25,15 +25,25 @@ module Ripr
 
       def call(selected, adapter, &progress)
         results, ready = classify(selected)
+        @static_run&.prepare if @config[:static] && ready.count { |mutant| mutant["static"] } > 1
         ready.sort_by! { |mutant| estimated_cost(mutant) }
         timeout = method(:deadline)
         completed = Child.batch(ready, jobs: @config[:jobs], timeout: timeout, on_complete: progress,
                                        on_result: @profile&.method(:record_mutation)) do |mutant, slot|
           execute(mutant, slot, adapter)
         end
-        originals = @config[:verify_killed] ? verify_kills(completed, adapter, timeout) : {}
+        verify = @config[:verify_killed] || @config[:baseline_runs] > 1
+        originals = verify ? verify_kills(completed, adapter, timeout) : {}
         diagnoses = diagnose(completed, adapter)
         results.concat(record_results(completed, originals, diagnoses)).sort_by { |mutant| mutant.fetch("full_id") }
+      ensure
+        @static_run&.close
+      end
+
+      def shard_costs(selected)
+        _, ready = classify(selected)
+        costs = ready.to_h { |mutant| [mutant.fetch("full_id"), estimated_cost(mutant)] }
+        selected.to_h { |mutant| [mutant.full_id, costs.fetch(mutant.full_id, 0)] }
       end
 
       private

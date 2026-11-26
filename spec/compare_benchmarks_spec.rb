@@ -210,20 +210,22 @@ RSpec.describe "end-to-end benchmark script" do
       Dir.mktmpdir("ripr-partial-comparison") do |directory|
         File.write(File.join(directory, "source.rb"), "42\n")
         failure_run = phase == "full" ? 2 : 3
-        code = <<~RUBY
-          require "json"
-          count = File.exist?("attempts") ? Integer(File.read("attempts")) + 1 : 1
-          File.write("attempts", count)
-          sleep 60 if count == #{failure_run}
-          puts JSON.generate("summary" => { "killed" => 1, "survived" => 0 })
-        RUBY
-        delayed = [RbConfig.ruby, "-e", code]
-        immediate = [RbConfig.ruby, "-e", 'puts %q({"summary":{"killed":1,"survived":0}})']
+        success = %q(printf '%s\n' '{"summary":{"killed":1,"survived":0}}')
+        code = <<~SH
+          count=0
+          if [ -f attempts ]; then read -r count < attempts; fi
+          count=$((count + 1))
+          printf '%s\\n' "$count" > attempts
+          if [ "$count" -eq #{failure_run} ]; then exec sleep 60; fi
+          #{success}
+        SH
+        delayed = ["/bin/sh", "-ec", code]
+        immediate = ["/bin/sh", "-ec", success]
         config = { "project" => "partial", "tool" => "ripr", "directory" => directory,
                    "file" => "source.rb", "before" => "42", "after" => "(42)", "caches" => [],
                    "full" => phase == "full" ? delayed : immediate,
                    "incremental" => phase == "incremental" ? delayed : immediate,
-                   "format" => "ripr", "timeout_seconds" => 0.4 }
+                   "format" => "ripr", "timeout_seconds" => 1 }
         manifest = File.join(directory, "manifest.json")
         destination = File.join(directory, "results.json")
         File.write(manifest, JSON.generate([config]))
