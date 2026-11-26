@@ -283,9 +283,9 @@ module Ripr
             probe_sites: probe_table.keys,
             graph: @call_graph,
             load_dependencies: @load_dependencies,
-             shared_baseline: !@sharding.nil?,
-             environment_hash:,
-             boot_digest: boot_digest
+            shared_baseline: !@sharding.nil?,
+            environment_hash:,
+            boot_digest: boot_digest
           )
           Process.warmup
           if @sharding
