@@ -60,6 +60,10 @@ Use `--boot FILE` for a different environment file. ripr also recognizes a conve
 
 Start with the test database prepared. SQLite uses file copies. PostgreSQL and MySQL require their dump and restore clients on `PATH` and test credentials that can create and drop isolated databases on the test server. Name server-backed test databases with a `test` component, such as `myapp_test`.
 
+Set `RIPR_POSTGRESQL_TEMPLATE_CACHE=1` to reuse an eligible PostgreSQL worker template when the booted database matches. Use a direct or session-pooled PostgreSQL connection and a `pg_restore` client with `--restrict-key`. Databases with unlogged tables, populated materialized views, or extensions beyond `plpgsql` use a per-run copy.
+
+PostgreSQL keeps a sealed `ripr_test_cache_*` database for each test database, project, and role. Drop the retained templates to reclaim disk space or before running `pg_upgrade`.
+
 ## Reading the results
 
 ripr observes an unmodified test run, then runs relevant tests against each mutation. Each gap tells you what to investigate next.
