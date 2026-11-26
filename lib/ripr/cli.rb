@@ -24,7 +24,7 @@ module Ripr
     end
 
     def call
-      command = %w[run list init accept init-skill mcp reach-map shard-plan].include?(@arguments.first) ? @arguments.shift : "run"
+      command = %w[run list init accept init-skill mcp reach-map shard-plan merge].include?(@arguments.first) ? @arguments.shift : "run"
       @list_kind = @arguments.shift if command == "list" && %w[mutants operators].include?(@arguments.first)
       parser.parse!(@arguments)
       return 0 if @help
@@ -60,7 +60,7 @@ module Ripr
 
     def parser
       OptionParser.new do |options|
-        options.banner = "Usage: ripr [run|list|init|accept|init-skill|mcp|reach-map|shard-plan TOTAL] [options] [PATHS...]"
+        options.banner = "Usage: ripr [run|list|init|accept|init-skill|mcp|reach-map|shard-plan TOTAL|merge] [options] [PATHS...]"
         options.on("--since REF") { |v| @overrides[:since] = v }
         options.on("--shard INDEX/TOTAL", "Run one slice from a shared baseline plan") { |v| @overrides[:shard] = v }
         options.on("--shard-plan PATH", "Path to the shared shard plan") { |v| @overrides[:shard_plan] = v }
@@ -114,8 +114,15 @@ module Ripr
 
     def execute(command)
       config = Config.load(command == "list" ? @overrides.merge(dry_run: true) : @overrides)
+      if command == "merge"
+        raise ArgumentError, "merge does not take --shard or --dry-run" if config[:shard] || config[:dry_run]
+
+        require_relative "engine/shard_report"
+        summary = Engine::ShardReport.write(config, config[:shard_plan] || Engine::ShardPlan::PATH, @arguments, stdout: @stdout)
+        return quality_exit(config, summary)
+      end
       if (config[:shard] && command != "run") || (config[:shard_plan] && !config[:shard] && command != "shard-plan")
-        raise ArgumentError, "use --shard with run and --shard-plan with shard-plan or --shard"
+        raise ArgumentError, "use --shard with run and --shard-plan with shard-plan, --shard, or merge"
       end
       return init if command == "init"
       return init_skill if command == "init-skill"
@@ -147,6 +154,11 @@ module Ripr
       runner.profile&.write(config[:report_dir], results.length, runner.metrics, runner.baseline)
       return 0 if config[:dry_run] || command == "list"
       return 0 if config[:shard]
+
+      quality_exit(config, summary)
+    end
+
+    def quality_exit(config, summary)
       return 2 if config[:fail_on_survived] && summary.fetch("survived").positive?
       return 2 if config[:thresholds]["break"] && summary.fetch("score") < config[:thresholds].fetch("break")
 
