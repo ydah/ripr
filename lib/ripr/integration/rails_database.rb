@@ -69,6 +69,10 @@ module Ripr
           remove(@parent) if @parent
         end
 
+        def snapshot_paths
+          [@pristine, @ready]
+        end
+
         private
 
         def source(database, root)

@@ -17,6 +17,7 @@ module SelfMutateEngine
   CLI_TESTS = ["spec/cli_spec.rb"].freeze
   SUITES = {
     "baseline_cache.rb" => ["spec/baseline_cache_spec.rb", *CACHE_TESTS],
+    "boot_context.rb" => %w[spec/boot_context_spec.rb spec/cache_cli_spec.rb],
     "child.rb" => %w[spec/engine_spec.rb],
     "method_exits.rb" => %w[spec/method_exits_spec.rb spec/propagation_cli_spec.rb],
     "mutant.rb" => %w[spec/mutation_plan_spec.rb spec/cli_spec.rb],
