@@ -368,14 +368,15 @@ RSpec.describe Ripr::Engine::MethodExits do
     expect(overflow).to eq("Sample#compute" => nil)
   end
 
-  it "drops a subject when its calls across tests exceed the per-subject limit" do
+  it "keeps complete tests when calls across tests exceed the per-subject limit" do
     instance = subject_class.new
     targets = { "Sample#compute" => instance.method(:compute) }
     _, overflow = described_class.observe(targets) do
       8.times { |test| as_test("test #{test}") { 32.times { instance.compute(false) } } }
       as_test("one more test") { instance.compute(false) }
     end
-    expect(overflow).to eq("Sample#compute" => nil)
+    retained = (0...8).to_h { |test| ["test #{test}", Array.new(32, returned(false))] }
+    expect(overflow).to eq("Sample#compute" => retained)
   end
 
   it "preserves exits from subjects within the total call limit when a later subject exceeds it" do
