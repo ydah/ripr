@@ -252,6 +252,7 @@ module Ripr
       def run_project(selection, &)
         probe_table = @table.slice(*selection.observed.map(&:site).uniq)
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        environment_hash = Snapshot.environment_hash
         if @config[:boot] || @config[:rails]
           require_relative "boot_context"
           @boot_context = BootContext.new(boot: @config[:boot], rails: @config[:rails], source_paths: @sources.keys)
@@ -283,6 +284,7 @@ module Ripr
             graph: @call_graph,
             load_dependencies: @load_dependencies,
             shared_baseline: !@sharding.nil?,
+            environment_hash:,
             boot_digest: boot_digest
           )
           Process.warmup

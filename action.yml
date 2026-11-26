@@ -1,3 +1,4 @@
+# See .github/workflows/shard-transport.yml for a shard matrix with a shared baseline.
 name: ripr mutation tests
 description: Run diff-driven Ruby mutation tests and annotate surviving mutants.
 inputs:

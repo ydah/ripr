@@ -73,6 +73,16 @@ module Ripr
         Digest::SHA256.hexdigest(JSON.generate(record.values_at(*MUTATION_FIELDS)))
       end
 
+      def self.runtime_identity
+        [RUBY_DESCRIPTION, RUBY_PLATFORM, Prism::VERSION, Ripr::VERSION, Snapshot.environment_hash]
+      end
+
+      def self.feature_inputs(features)
+        features.select { |path| path.start_with?("/") && File.file?(path) }.sort.uniq.to_h do |path|
+          [path, Digest::SHA256.file(path).hexdigest]
+        end
+      end
+
       def self.assign(costs, count)
         buckets = Array.new(count) { [] }
         totals = Array.new(count, 0)
@@ -117,7 +127,7 @@ module Ripr
           raise ArgumentError, "shard plan cannot verify test inputs because the baseline observed opaque data or process state"
         end
 
-        result.merge("test_load_inputs" => feature_inputs($LOADED_FEATURES - existing))
+        result.merge("test_load_inputs" => self.class.feature_inputs($LOADED_FEATURES - existing))
       end
 
       def boot_identity(framework, paths, tests, rails, load_reached)
@@ -128,11 +138,11 @@ module Ripr
 
         @loaded_paths = paths + tests.map { |test| test.fetch("file") }
         @loaded_inputs = @capture.test_inputs(@loaded_paths)
-        @loaded_features = feature_inputs($LOADED_FEATURES)
+        @loaded_features = self.class.feature_inputs($LOADED_FEATURES)
         { "framework" => framework, "test_load_order" => paths, "discovered" => tests,
           "test_inputs" => @loaded_inputs, "database_inputs" => database,
           "load_reads" => observations.fetch("load_reads"), "load_reached" => load_reached.sort,
-          "loaded_features" => digest(@loaded_features) }
+          "loaded_features" => @loaded_features }
       end
 
       def validate_boot!(boot)
@@ -155,7 +165,7 @@ module Ripr
         end
           raise ArgumentError, "shard plan has invalid test load inputs"
         end
-        unless feature_inputs(inputs.keys) == inputs
+        unless self.class.feature_inputs(inputs.keys) == inputs
           raise ArgumentError, "shard plan does not match Ruby dependencies loaded by the baseline"
         end
 
@@ -219,9 +229,9 @@ module Ripr
                                      :typecheck, :verify_killed, :verify_not_infected, :call_graph_reuse).transform_keys(&:to_s)
         { "head" => @git.clean_head(operation: "shard plan"), "project_prefix" => @git.project_prefix, "cwd" => Dir.pwd,
           "since_base" => since_base,
-          "runtime" => [RUBY_DESCRIPTION, RUBY_PLATFORM, Prism::VERSION, Ripr::VERSION, Digest::SHA256.hexdigest(Marshal.dump(ENV.to_a.sort))],
+          "runtime" => self.class.runtime_identity,
           "implementation" => implementation_hash,
-          "preloaded_features" => digest(feature_inputs($LOADED_FEATURES)),
+          "preloaded_features" => digest(self.class.feature_inputs($LOADED_FEATURES)),
           "settings" => settings, "sources" => sources.transform_values { |source| Digest::SHA256.hexdigest(source) },
           "probe_table" => Digest::SHA256.hexdigest(JSON.generate(probe_table.sort.to_h)),
           "inputs" => @capture&.provenance&.slice("boot_inputs", "external_inputs") }
@@ -230,8 +240,8 @@ module Ripr
       def validate_stable_inputs!
         if @git.clean_head(operation: "shard plan") == @project.fetch("head") && since_base == @project.fetch("since_base") &&
            (!@capture || @capture.stable_inputs?) && (!@loaded_paths || @capture.test_inputs(@loaded_paths) == @loaded_inputs) &&
-           (!@loaded_features || feature_inputs(@loaded_features.keys) == @loaded_features) &&
-           (!@test_load_inputs || feature_inputs(@test_load_inputs.keys) == @test_load_inputs)
+           (!@loaded_features || self.class.feature_inputs(@loaded_features.keys) == @loaded_features) &&
+           (!@test_load_inputs || self.class.feature_inputs(@test_load_inputs.keys) == @test_load_inputs)
           return
         end
 
@@ -246,12 +256,6 @@ module Ripr
         root = File.expand_path("../..", __dir__)
         content = Dir.glob("**/*.rb", base: root).sort.to_h { |path| [path, Digest::SHA256.file(File.join(root, path)).hexdigest] }
         digest(content)
-      end
-
-      def feature_inputs(features)
-        features.select { |path| path.start_with?("/") && File.file?(path) }.sort.uniq.to_h do |path|
-          [path, Digest::SHA256.file(path).hexdigest]
-        end
       end
 
       def digest(data)

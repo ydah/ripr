@@ -60,6 +60,10 @@ Use `--boot FILE` for a different environment file. ripr also recognizes a conve
 
 Start with the test database prepared. SQLite uses file copies. PostgreSQL and MySQL require their dump and restore clients on `PATH` and test credentials that can create and drop isolated databases on the test server. Name server-backed test databases with a `test` component, such as `myapp_test`.
 
+Set `RIPR_POSTGRESQL_TEMPLATE_CACHE=1` to reuse an eligible PostgreSQL worker template when the booted database matches. Use a direct or session-pooled PostgreSQL connection and a `pg_restore` client with `--restrict-key`. Databases with unlogged tables, populated materialized views, or extensions beyond `plpgsql` use a per-run copy.
+
+PostgreSQL keeps a sealed `ripr_test_cache_*` database for each test database, project, and role. Drop the retained templates to reclaim disk space or before running `pg_upgrade`.
+
 ## Reading the results
 
 ripr observes an unmodified test run, then runs relevant tests against each mutation. Each gap tells you what to investigate next.
@@ -145,6 +149,14 @@ bundle exec ripr --shard 1/2 --no-samples --report-dir .ripr/shard-1
 ```
 
 Run the second shard with `--shard 2/2` and its own report directory. Use the same options, clean Git checkout, absolute project path, runtime, and test inputs for every job. Share plans from trusted runs. `--no-samples` keeps sampled application operands out of CI artifacts. Rails requires matching SQLite snapshots and uses one worker per shard. Collect each report directory's `shard.json` for aggregation.
+
+Download the plan and all result fragments in the merge job. Use `--threshold` or `--fail-on-survived` on `merge` to gate the combined result.
+
+```sh
+bundle exec ripr merge .ripr/shard-1/shard.json .ripr/shard-2/shard.json --reporter agent-v2 --reporter json
+```
+
+The [shard matrix workflow](.github/workflows/shard-transport.yml) passes the plan and fragments as artifacts within one run.
 
 When `--include-tests-diff` finds changed tests, sharding selects all candidate mutations so it includes coverage removed by the edit.
 
