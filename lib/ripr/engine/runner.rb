@@ -254,7 +254,7 @@ module Ripr
 
           capture_load_output { observe_boot { require File.expand_path(boot) } }
         end
-        yield observe_boot { load_tests }
+        observe_boot { load_tests }
       end
 
       def observe_boot(&)
