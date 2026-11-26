@@ -12,6 +12,12 @@ RSpec.describe "agent diagnosis and triage" do
   let(:root) { File.expand_path("..", __dir__) }
   let(:v2_schema_path) { File.join(root, "schema/agent-v2.json") }
 
+  def ripr(directory, *options)
+    output, error, status = Open3.capture3(RbConfig.ruby, File.join(root, "exe/ripr"), "--jobs", "1", *options, chdir: directory)
+    expect(status).to be_success, error
+    output.force_encoding(Encoding::UTF_8)
+  end
+
   def agent_report(directory, *options)
     flags = %w[--jobs 1 --reporter agent-v2 --reporter agent] + options
     output, error, status = Open3.capture3(RbConfig.ruby, File.join(root, "exe/ripr"), *flags, chdir: directory)
@@ -67,9 +73,7 @@ RSpec.describe "agent diagnosis and triage" do
       expect(card).to include("file" => "lib/sample.rb", "stages" => { "not_revealed" => 3 }, "first_gap" => discount.fetch("full_id"))
       expect(report.fetch("weak_tests")).to contain_exactly(include("id" => "SampleTest#test_discount_runs", "reached" => 3))
 
-      text, error, status = Open3.capture3(RbConfig.ruby, File.join(root, "exe/ripr"), "--jobs", "1", chdir: directory)
-      expect(status).to be_success, error
-      expect(text.force_encoding(Encoding::UTF_8)).to include(
+      expect(ripr(directory)).to include(
         "Sample.discount (lib/sample.rb) · 3 not revealed · Start with #{discount.fetch('id')}",
         "SampleTest#test_discount_runs (3 reached)"
       )
@@ -82,6 +86,70 @@ RSpec.describe "agent diagnosis and triage" do
       edited = agent_report(directory, "--since", "HEAD")
       expect(edited.fetch("gaps")).not_to be_empty
       expect(edited.fetch("gaps")).to all(include("subject" => "Sample.discount", "stage" => "not_revealed", "priority" => 3))
+    end
+  end
+
+  it "flags possible equivalence only when method exits match across several covering tests" do
+    Dir.mktmpdir("ripr-equivalence") do |directory|
+      FileUtils.mkdir_p(%w[lib test].map { |path| File.join(directory, path) })
+      File.write(File.join(directory, "lib/sample.rb"), <<~RUBY)
+        module Sample
+          def self.hidden(value)
+            value >= 18
+            true
+          end
+
+          def self.limited(value)
+            value >= 18
+            true
+          end
+
+          def self.visible(value)
+            value >= 18
+          end
+        end
+      RUBY
+      File.write(File.join(directory, "test/sample_test.rb"), <<~'RUBY')
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+
+        class SampleTest < Minitest::Test
+          [18, 19, 20].each do |age|
+            define_method("test_age_#{age}") do
+              assert Sample.hidden(age)
+              assert Sample.limited(age) unless age == 20
+              refute_nil Sample.visible(age)
+            end
+          end
+        end
+      RUBY
+
+      arguments = %w[--operators comparison]
+      report = agent_report(directory, "--full", "--reporter", "html", *arguments)
+      gaps = report.fetch("gaps").to_h { |gap| [gap.fetch("subject"), gap] }
+      hint = "Possible equivalent mutation. Observed method exits matched in all 3 covering tests. Review side effects before accepting."
+      hidden = gaps.fetch("Sample.hidden")
+      expect(hidden).to include("stage" => "not_propagated", "equivalence_suspected" => true, "hint" => hint)
+      expect(hidden.fetch("covering_tests").length).to eq(3)
+      limited = gaps.fetch("Sample.limited")
+      expect(limited).to include("stage" => "not_propagated", "hint" => a_string_including("Try inputs"))
+      expect(limited.fetch("covering_tests").length).to eq(2)
+      expect(limited).not_to have_key("equivalence_suspected")
+      expect(gaps.fetch("Sample.visible")).to include("stage" => "not_revealed")
+      expect(gaps.fetch("Sample.visible")).not_to have_key("equivalence_suspected")
+      expect(report.fetch("summary")).to include("not_propagated" => 2, "not_revealed" => 1, "survived" => 3, "score" => 0.0)
+      expect(File.binread(File.join(directory, ".ripr/report/index.html"))).to include(hint)
+      mte = JSON.parse(File.binread(File.join(directory, ".ripr/report/mutation.json")))
+      reasons = mte.fetch("files").fetch("lib/sample.rb").fetch("mutants").map { |mutant| mutant.fetch("statusReason") }
+      expect(reasons.grep(/Possible equivalent mutation/)).to eq(["not_propagated. #{hint}"])
+
+      expect(ripr(directory, *arguments).scan(hint).length).to eq(1)
+
+      legacy = JSON.parse(ripr(directory, *arguments, "--reporter", "agent"))
+      schema = JSONSchemer.schema(Pathname.new(File.join(root, "schema/agent-v1.json")))
+      expect(schema.validate(legacy).to_a).to be_empty
+      expect(legacy.fetch("gaps").flat_map(&:keys)).not_to include("equivalence_suspected")
+      expect(legacy.fetch("gaps").find { |gap| gap["subject"] == "Sample.hidden" }.fetch("hint")).to eq(limited.fetch("hint"))
     end
   end
 end
