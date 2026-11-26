@@ -21,6 +21,7 @@ RSpec.describe "incremental ripr commands" do
       cache = File.join(directory, ".ripr")
       FileUtils.remove_entry(cache) if File.directory?(cache)
       git(directory, "init", "-q")
+      git(directory, "config", "maintenance.auto", "false")
       git(directory, "config", "user.name", "Ripr Test")
       git(directory, "config", "user.email", "test@example.test")
       git(directory, "add", "lib", "test")
@@ -45,6 +46,65 @@ RSpec.describe "incremental ripr commands" do
 
   def snapshot(directory)
     JSON.parse(File.read(File.join(directory, ".ripr/snapshot.json")))
+  end
+
+  it "reuses custom boot results only when the boot inputs are unchanged" do
+    with_project do |directory|
+      threshold = File.join(directory, "config", "threshold.txt")
+      FileUtils.mkdir_p(File.dirname(threshold))
+      File.write(threshold, "18\n")
+      setup = File.join(directory, "setup.rb")
+      File.write(setup, "THRESHOLD = Integer(File.read(#{threshold.dump}))\n")
+      source = File.join(directory, "lib", "sample.rb")
+      File.write(source, File.read(source).sub("age >= 18", "age >= THRESHOLD"))
+      options = %w[--boot setup.rb --jobs 1]
+
+      command(directory, *options)
+      expect(snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 2, "reused" => 0)
+      command(directory, *options)
+      expect(snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 0, "reused" => 1)
+      command(directory, *options, "--full")
+      expect(snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 2, "reused" => 0)
+
+      File.write(threshold, "19\n")
+      command(directory, *options)
+      expect(snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 2, "reused" => 0)
+      File.open(setup, "a") { |file| file.puts("Time.now") }
+      2.times do
+        command(directory, *options)
+        expect(snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 2, "reused" => 0)
+      end
+    end
+  end
+
+  { "external boot" => 0, "external boot helper" => 1, "delegated external boot helpers" => 3 }.each do |description, hops|
+    it "checks the baseline again when #{description} observes a changed path" do
+      with_project do |directory|
+        Dir.mktmpdir("ripr-external-boot") do |external|
+          marker = File.join(external, "marker")
+          setup = File.join(external, "setup.rb")
+          File.write(setup, "THRESHOLD = File.exist?(#{marker.dump}) ? 30 : 18\n")
+          if hops.positive?
+            (hops - 1).times do |index|
+              helper = File.join(external, "helper_#{index}.rb")
+              File.write(helper, "require #{setup.dump}\n")
+              setup = helper
+            end
+            entry = File.join(directory, "setup.rb")
+            File.write(entry, "require #{setup.dump}\n")
+            setup = entry
+          end
+
+          source = File.join(directory, "lib", "sample.rb")
+          File.write(source, File.read(source).sub("age >= 18", "age >= THRESHOLD"))
+          options = ["--boot", setup, "--jobs", "1"]
+          command(directory, *options)
+          File.write(marker, "present\n")
+          _, error = command(directory, *options, expected: 4)
+          expect(error).to include("baseline failed")
+        end
+      end
+    end
   end
 
   it "reuses cached results when the automatic memory limit changes" do

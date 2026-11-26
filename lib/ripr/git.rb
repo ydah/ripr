@@ -9,8 +9,36 @@ module Ripr
       @root = File.expand_path(root)
     end
 
+    def clean_head(operation: "reach-map")
+      cache_entry = "?? #{project_prefix}.ripr/".b
+      status = execute("status", "--porcelain=v1", "-z", "--untracked-files=all").split("\0")
+      raise ArgumentError, "#{operation} requires a clean Git worktree" unless status.all? { |entry| entry.start_with?(cache_entry) }
+
+      execute("rev-parse", "--verify", "HEAD^{commit}").strip
+    rescue Error => e
+      raise ArgumentError, e.message
+    end
+
+    def project_prefix
+      execute("rev-parse", "--show-prefix").chomp.force_encoding(Encoding::UTF_8)
+    end
+
+    def merge_base(ref)
+      execute("merge-base", "--", ref, "HEAD").strip
+    end
+
+    def repository_changes(base)
+      changed = path_entries("diff", "--no-relative", "--name-only", "-z", "--no-renames", base, "--")
+      untracked = path_entries("ls-files", "--full-name", "--others", "--exclude-standard", "-z", "--", ":/")
+      changed | untracked.reject { |path| path.start_with?("#{project_prefix}.ripr/") }
+    end
+
+    def content(base, path)
+      execute("show", "#{base}:#{project_prefix}#{path}")
+    end
+
     def changed_lines(ref, paths = nil, include_all_paths: false)
-      base = execute("merge-base", "--", ref, "HEAD").strip
+      base = merge_base(ref)
       selected = Array(paths)
       entries = path_entries("diff", "--relative", "--name-status", "-z", "--find-renames", base, "--", *selected)
       changed = {}
