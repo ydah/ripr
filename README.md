@@ -148,7 +148,11 @@ steps:
   - run: bundle exec ripr --since origin/main --reporter text --reporter github
 ```
 
-The `github` reporter adds annotations for surviving mutations. The [composite action](action.yml) also caches `.ripr/`. After establishing a baseline, add `--fail-on-survived` or `--threshold 80` to enforce a quality gate.
+The `github` reporter adds annotations for surviving mutations. The [composite action](action.yml) also caches `.ripr/snapshot.json`. After establishing a baseline, add `--fail-on-survived` or `--threshold 80` to enforce a quality gate.
+
+For suites whose tests can run independently, use `reach-map: record` in the action on default-branch pushes or a schedule. In the `pull_request` workflow, set `reach-map: use` and `reach-map-workflow` to the recording workflow's filename. Give the PR job `actions: read` and use the same runner type, Ruby, and bundle setup in both jobs. The action uses a reach map from a successful run for the exact merge base when one is available, and runs the ordinary baseline on a miss.
+
+Both modes keep the Ruby, Bundler, locale, and workspace environment and drop other variables. Set the same space-separated `reach-map-env` list in both workflows for additional inputs such as `RAILS_ENV` or project-specific test settings. The CLI checks the full resulting environment before using the map.
 
 | Exit code | Meaning |
 | --- | --- |
