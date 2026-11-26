@@ -45,6 +45,9 @@ bundle exec ripr --since origin/main
 
 `--since` selects mutations on lines changed since the merge base, including staged, unstaged, and untracked source changes. Use `--scope method` to include every mutation in a touched method. The score and quality gates apply to the selected mutations.
 
+For deterministic, order-independent tests, run `bundle exec ripr reach-map` on the clean base revision, then run
+`bundle exec ripr --since origin/main --reach-map .ripr/reach-map.json` on your branch. Use a map from a trusted run with the same Ruby, environment, and test and source settings, including `--rails` when needed. Rails selection requires matching SQLite snapshots. Ripr includes tests that make opaque observations and runs the full baseline when load inputs cannot be verified. Use a full baseline for dependencies outside the recorded Ruby calls and observed file operations.
+
 Add `--include-tests-diff` to select mutations reached by tests in changed files. ripr also checks saved reach data for those files when available. A removed test file or changed test helper can select the entire target.
 
 ## Rails

@@ -54,6 +54,7 @@ module Ripr
       OptionParser.new do |options|
         options.banner = "Usage: ripr [run|list|init|accept|init-skill|mcp|reach-map] [options] [PATHS...]"
         options.on("--since REF") { |v| @overrides[:since] = v }
+        options.on("--reach-map FILE", "Select baseline tests for --since using a trusted reach map") { |v| @overrides[:reach_map] = v }
         options.on("--scope SCOPE") { |v| @overrides[:scope] = v }
         options.on("--framework FRAMEWORK") { |v| @overrides[:framework] = v }
         options.on("--tests GLOB") { |v| (@overrides[:tests] ||= []) << v }
