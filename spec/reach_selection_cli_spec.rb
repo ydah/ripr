@@ -111,6 +111,164 @@ RSpec.describe "ripr reach-map selection" do
     end
   end
 
+  def expect_file_selection(files, loads_trailing:)
+    with_load_audit do |environment, audit|
+      with_project(files) do |directory|
+        base = capture(directory, environment: environment)
+        write(directory, "lib/sample.rb", source.sub("3 + 2", "4 + 2"))
+        commit(directory, "edit method")
+        full = report(directory, base, environment: environment)
+        selected = select_report(directory, base, "--reach-map-files", files.keys.last, environment: environment) do |diagnostic|
+          expect(diagnostic).not_to include("retrying with all test files")
+        end
+
+        expect(baseline_count(full)).to eq(2)
+        expect(baseline_count(selected)).to eq(1)
+        expect(selected.values_at("summary", "gaps")).to eq(full.values_at("summary", "gaps"))
+        trailing = File.realpath(File.join(directory, files.keys.last))
+        loaded = File.readlines(audit, chomp: true)
+        loads_trailing ? expect(loaded).to(include(trailing)) : expect(loaded).not_to(include(trailing))
+      end
+    end
+  end
+
+  it "omits independent Minitest DSL tests with setup and teardown blocks" do
+    support = <<~RUBY
+      require "minitest/spec"
+      Minitest::Test.extend(Minitest::Spec::DSL)
+      class << Minitest::Test
+        alias test it
+        alias setup before
+        alias teardown after
+      end
+    RUBY
+    first = minitest.sub("  def test_positive = assert(Sample.positive?)\n", "")
+                    .sub('require "sample"', "require \"sample\"\nrequire \"./test/support.rb\"")
+    last = <<~RUBY
+      require "minitest/autorun"
+      require "sample"
+      require "./test/support.rb"
+      class LastTest < Minitest::Test
+        setup { @ready = true }
+        teardown { assert(@ready) }
+        test("is positive") { assert(Sample.positive?) }
+      end
+    RUBY
+    expect_file_selection({ "test/support.rb" => support, "test/first_test.rb" => first, "test/last_test.rb" => last },
+                          loads_trailing: false)
+  end
+
+  {
+    "a custom superclass" => [<<~RUBY, "class LastTest < SupportTest\n  def test_positive = assert(Sample.positive?)\nend\n"],
+      class SupportTest < Minitest::Test
+        def self.inherited(child)
+          super
+          $minimum = 5
+        end
+      end
+    RUBY
+    "a class without a superclass" => ["class LastTest < Minitest::Test; end\n", <<~RUBY],
+      class LastTest
+        $minimum = 5
+        def test_positive = assert(Sample.positive?)
+      end
+    RUBY
+    "a class with no tests" => [<<~RUBY, <<~RUBY],
+      Minitest::Test.singleton_class.prepend(Module.new do
+        def inherited(child)
+          super
+          $minimum = 5 if child.name == "ConfigurationTest"
+        end
+      end)
+    RUBY
+      class ConfigurationTest < Minitest::Test
+        def minimum = 5
+      end
+      class LastTest < Minitest::Test
+        def test_positive = assert(Sample.positive?)
+      end
+    RUBY
+    "an unsupported test DSL" => [<<~RUBY, <<~RUBY],
+      require "minitest/spec"
+      Minitest::Test.extend(Minitest::Spec::DSL)
+      Minitest::Test.singleton_class.prepend(Module.new do
+        def inherited(child)
+          super
+          $minimum = 5 if child.name == "LastTest"
+        end
+      end)
+    RUBY
+      class LastTest < Minitest::Test
+        it("is positive") { assert(Sample.positive?) }
+      end
+    RUBY
+    "a class body setting" => ["# shared support\n", <<~RUBY]
+      class LastTest < Minitest::Test
+        $minimum = 5
+        def test_positive = assert(Sample.positive?)
+      end
+    RUBY
+  }.each do |declaration, (support, last)|
+    it "retains trailing Minitest declarations containing #{declaration}" do
+      first = minitest.sub("  def test_positive = assert(Sample.positive?)\n", "")
+                      .sub('require "sample"', "require \"sample\"\nrequire \"./test/support.rb\"")
+                      .sub(":>=, 5", ":>=, $minimum || 0")
+      last = "require \"minitest/autorun\"\nrequire \"sample\"\nrequire \"./test/support.rb\"\n#{last}"
+      expect_file_selection({ "test/support.rb" => support, "test/first_test.rb" => first, "test/last_test.rb" => last },
+                            loads_trailing: true)
+    end
+  end
+
+  it "retains a trailing Minitest file that imports additional test settings" do
+    first = minitest.sub("  def test_positive = assert(Sample.positive?)\n", "").sub(":>=, 5", ":>=, $minimum || 0")
+    last = minitest.sub("  def test_calculate = assert_operator(Sample.calculate, :>=, 5)\n", "")
+                   .sub("SampleTest", "LastTest").sub('require "sample"', "require \"sample\"\nrequire \"./test/settings.rb\"")
+    expect_file_selection({ "test/settings.rb" => "$minimum = 5\n", "test/first_test.rb" => first, "test/last_test.rb" => last },
+                          loads_trailing: true)
+  end
+
+  {
+    "relative imports" => ["require \"./test/settings.rb\"\n", 'require_relative "./test/settings.rb"',
+                           { "test/settings.rb" => "$minimum = 0\n", "test/test/settings.rb" => "$minimum = 5\n" }],
+    "a default require argument" => [<<~RUBY, "require", { "test/settings.rb" => "$minimum = 5\n" }],
+      def require(path = "./test/settings.rb")
+        super(path)
+      end
+    RUBY
+    "a computed require argument" => ["", 'require File.expand_path("settings.rb", __dir__)', { "test/settings.rb" => "$minimum = 5\n" }]
+  }.each do |loader, (setup, declaration, settings)|
+    it "retains a trailing Minitest file with #{loader}" do
+      first = minitest.sub("  def test_positive = assert(Sample.positive?)\n", "")
+                      .sub("class SampleTest", "#{setup}class SampleTest").sub(":>=, 5", ":>=, $minimum || 0")
+      last = minitest.sub("  def test_calculate = assert_operator(Sample.calculate, :>=, 5)\n", "")
+                     .sub("SampleTest", "LastTest").sub('require "sample"', "require \"sample\"\n#{declaration}")
+      expect_file_selection(settings.merge("test/first_test.rb" => first, "test/last_test.rb" => last),
+                            loads_trailing: true)
+    end
+  end
+
+  it "retains a trailing RSpec group with metadata that configures shared test settings" do
+    support = <<~RUBY
+      RSpec.configure do |config|
+        config.on_example_group_definition do |group|
+          $minimum = 5 if group.metadata[:stricter]
+        end
+      end
+    RUBY
+    first = rspec.sub("describe Sample", 'describe "first"').sub(/  it\("is positive"\).*\n/, "")
+                 .sub('require "sample"', "require \"sample\"\nrequire \"./spec/support.rb\"")
+                 .sub("be >= 5", "be >= ($minimum || 0)")
+    last = <<~RUBY
+      require "sample"
+      require "./spec/support.rb"
+      RSpec.describe "last", stricter: true do
+        it("is positive") { expect(Sample.positive?).to be(true) }
+      end
+    RUBY
+    expect_file_selection({ "spec/support.rb" => support, "spec/first_spec.rb" => first, "spec/last_spec.rb" => last },
+                          loads_trailing: true)
+  end
+
   %w[minitest rspec].each do |framework|
     it "loads fewer #{framework} files when a trailing declaration is independent" do
       files = if framework == "minitest"
