@@ -119,6 +119,28 @@ module Ripr
         with_project(active: mutant) { |adapter| capture_load_output { adapter.run(test_ids, fail_fast: true) } }
       end
 
+      def record_reach_map
+        if @config[:since] || @config[:dry_run] || !@config[:only].empty?
+          raise ArgumentError, "reach-map requires a complete baseline without --since, --only, or --dry-run"
+        end
+
+        require_relative "reach_map"
+        git = Git.new
+        base = git.clean_head
+        plan
+        reach_map = ReachMap.new(@sources, @config)
+        result, tests = with_project(observer: reach_map) do |adapter|
+          reach_map.capture { @rails.prepare_workers(1) } if @rails
+          tests = adapter.tests
+          result = run_baseline do
+            baseline = reach_map.capture { run_baseline_tests(adapter, nil) }
+            baseline.merge("observations" => reach_map.observations)
+          end
+          [result, tests]
+        end
+        reach_map.write(result, tests, @test_files, @framework, base, git)
+      end
+
       def public_subjects
         MethodExits.public_subjects(method_targets)
       end
@@ -199,9 +221,19 @@ module Ripr
         @method_targets ||= MethodExits.targets(@mutants)
       end
 
-      def with_project(probe: nil, active: nil)
+      def with_project(probe: nil, active: nil, observer: nil)
         previous_ripr = ENV.fetch("RIPR", nil)
         ENV["RIPR"] = "1"
+        adapter = observer ? observer.capture { load_project(probe, active) } : load_project(probe, active)
+        yield adapter
+      ensure
+        @loader&.uninstall
+        @rails&.close
+        R.reset
+        previous_ripr.nil? ? ENV.delete("RIPR") : ENV["RIPR"] = previous_ripr
+      end
+
+      def load_project(probe, active)
         if @config[:rails]
           require_relative "../integration/rails"
           @rails = Integration::Rails.new(boot: @config[:boot])
@@ -222,12 +254,7 @@ module Ripr
 
           capture_load_output { observe_boot { require File.expand_path(boot) } }
         end
-        yield observe_boot { load_tests }
-      ensure
-        @loader&.uninstall
-        @rails&.close
-        R.reset
-        previous_ripr.nil? ? ENV.delete("RIPR") : ENV["RIPR"] = previous_ripr
+        observe_boot { load_tests }
       end
 
       def observe_boot(&)
@@ -382,26 +409,32 @@ module Ripr
                                                                source_hash: @cache.source_hash, test_hashes: @cache.test_hashes,
                                                                tests: tests, full: @config[:full])
         fresh = unless cache.test_ids == []
-                  Child.call(timeout_ms: 60_000 + (@rails&.worker_timeout_ms || 0)) do
+                  run_baseline do
                     probe = Probe.new(probe_table, samples: @config[:samples])
                     R.probe = probe
-                    result = if @rails
-                               @rails.with_worker(0) { adapter.run(cache.test_ids) }
-                             else
-                               adapter.run(cache.test_ids)
-                             end
+                    result = run_baseline_tests(adapter, cache.test_ids)
                     result.merge("probe" => probe.snapshot)
                   end
                 end
-        if fresh && !fresh["success"]
-          failures = fresh["failures"] || [fresh["error"] || fresh["status"]]
-          messages = failures.map { |failure| failure.is_a?(Hash) ? failure["message"] : failure }
-          raise BaselineFailure, "baseline failed: #{messages.join('; ')}"
-        end
         fresh&.fetch("tests")&.each_value { |test| test["file"] = relative(test.fetch("file")) }
         @baseline = cache.combine(fresh, load_reached: load_reached)
         @metrics["baseline_reused"] = cache.reused_count.positive?
         @metrics["baseline_tests_run"] = fresh ? fresh.fetch("tests").length : 0
+      end
+
+      def run_baseline(&)
+        result = Child.call(timeout_ms: 60_000 + (@rails&.worker_timeout_ms || 0), &)
+        return result if result["success"]
+
+        failures = result["failures"] || [result["error"] || result["status"]]
+        messages = failures.map { |failure| failure.is_a?(Hash) ? failure["message"] : failure }
+        raise BaselineFailure, "baseline failed: #{messages.join('; ')}"
+      end
+
+      def run_baseline_tests(adapter, test_ids)
+        return adapter.run(test_ids) unless @rails
+
+        @rails.with_worker(0) { adapter.run(test_ids) }
       end
 
       def relative(path)

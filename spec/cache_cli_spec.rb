@@ -21,6 +21,7 @@ RSpec.describe "incremental ripr commands" do
       cache = File.join(directory, ".ripr")
       FileUtils.remove_entry(cache) if File.directory?(cache)
       git(directory, "init", "-q")
+      git(directory, "config", "maintenance.auto", "false")
       git(directory, "config", "user.name", "Ripr Test")
       git(directory, "config", "user.email", "test@example.test")
       git(directory, "add", "lib", "test")
