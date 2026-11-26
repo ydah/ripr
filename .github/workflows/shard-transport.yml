@@ -1,0 +1,90 @@
+name: Shard transport
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/shard-transport.yml
+      - action.yml
+      - Gemfile
+      - ripr.gemspec
+      - lib/ripr/cli.rb
+      - lib/ripr/config.rb
+      - lib/ripr/engine/shard*.rb
+      - lib/ripr/engine/runner.rb
+      - lib/ripr/engine/scheduler.rb
+      - lib/ripr/engine/result_cache.rb
+      - lib/ripr/reporters.rb
+      - script/shard_transport_smoke.sh
+      - test/fixtures/projects/minitest_basic/**
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        with:
+          ruby-version: '4.0.9'
+          bundler-cache: true
+      - run: bash script/shard_transport_smoke.sh plan
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ripr-shard-plan
+          path: ${{ runner.temp }}/ripr-shards/plan/shard-plan.json
+          if-no-files-found: error
+          retention-days: 1
+
+  shard:
+    needs: plan
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        index: [1, 2]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        with:
+          ruby-version: '4.0.9'
+          bundler-cache: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ripr-shard-plan
+          path: ${{ runner.temp }}/ripr-shards/plan
+      - env:
+          SHARD_INDEX: ${{ matrix.index }}
+        run: bash script/shard_transport_smoke.sh shard "$SHARD_INDEX"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ripr-result-${{ matrix.index }}
+          path: ${{ runner.temp }}/ripr-shards/result/shard.json
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: [plan, shard]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        with:
+          ruby-version: '4.0.9'
+          bundler-cache: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ripr-shard-plan
+          path: ${{ runner.temp }}/ripr-shards/plan
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ripr-result-*
+          path: ${{ runner.temp }}/ripr-shards/shards
+      - run: bash script/shard_transport_smoke.sh merge

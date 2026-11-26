@@ -3,6 +3,7 @@
 require "fileutils"
 require "open3"
 require "securerandom"
+require "tempfile"
 
 module Ripr
   module Integration
@@ -67,6 +68,10 @@ module Ripr
 
         def close
           remove(@parent) if @parent
+        end
+
+        def snapshot_paths
+          [@pristine, @ready]
         end
 
         private
@@ -186,27 +191,142 @@ module Ripr
 
       class PostgreSQL < Server
         TEMPLATE_REJECTION = /\b(?:3D000|42501|55006):/
+        CONNECTION_ENV = {
+          host: "PGHOST", port: "PGPORT", user: "PGUSER", password: "PGPASSWORD", sslmode: "PGSSLMODE", connect_timeout: "PGCONNECT_TIMEOUT"
+        }.freeze
+
+        def initialize(config, root, directory, index)
+          super
+          @cache_scope = [File.expand_path(root), config.fetch(:database), index] if ENV["RIPR_POSTGRESQL_TEMPLATE_CACHE"] == "1"
+        end
 
         def capture
+          release_template_lease
           @template = nil
+          @capture_identity = nil
           template = destination("template")
           remove(template)
-          return super unless template_available? && clone_database(template, @parent)
+          return super unless template_available?
+          return if with_template_cache(shared: true, retain: true) { |cache| reuse_template(cache) }
+          return super unless clone_database(template, identifier(@parent))
 
           dump(template, @ready)
-          @template = template if seal_template(template)
+          identity = snapshot_identity(template)
+          return unless seal_template(template)
+
+          @template = template
+          @capture_identity = identity
+          return unless identity && with_template_cache(retain: true) { |cache| cache.publish(identifier(template), identity) }
+
+          @template = nil
+          File.unlink(marker(template))
         end
 
         def worker(slot, fresh_boot:)
-          return super if fresh_boot || !@template
+          return super if fresh_boot || !(@template || @capture_identity)
 
           target = destination("worker_#{slot}")
           remove(target)
-          restore(@ready, target) unless clone_database(target, @template)
+          copied = if @template
+                     clone_database(target, identifier(@template))
+                   else
+                     with_template_cache(shared: true) do |cache|
+                       cache.identity == @capture_identity && clone_database(target, cache.quoted_name, cache.method(:execute))
+                     end
+                   end
+          unless copied
+            @capture_identity ? recover_cached_worker(target) : restore(@ready, target)
+          end
           target
         end
 
+        def close
+          release_template_lease
+        ensure
+          super
+        end
+
         private
+
+        def with_template_cache(shared: false, retain: false)
+          return unless @cache_scope
+
+          session = cache_connection("postgres")
+          return unless session
+
+          session.exec("SET idle_session_timeout = 0") if retain && session.server_version >= 140_000
+          cache = PostgreSQLTemplateCache.new(session, @cache_scope)
+          cache.with_lock(parent: @parent, shared: shared) do
+            result = yield cache
+            if result && retain
+              cache.downgrade_lock unless shared
+              @cache_lease = session
+              @cache_lease_pid = Process.pid
+            end
+            result
+          end
+        rescue ::PG::Error
+          nil
+        ensure
+          session&.close unless session.equal?(@cache_lease)
+        end
+
+        def release_template_lease
+          return unless @cache_lease_pid == Process.pid
+
+          @cache_lease&.close
+          @cache_lease = nil
+        end
+
+        def reuse_template(cache)
+          expected = cache.identity
+          return unless expected
+
+          identity = snapshot_identity(@parent) { dump(@parent, @ready) }
+          @capture_identity = identity if identity == expected && cache.identity == expected
+        rescue ArgumentError
+          nil
+        end
+
+        def recover_cached_worker(target)
+          verified = Tempfile.create("ripr-worker-", @directory) do |file|
+            archive = file.path
+            next true if clone_database(target, identifier(@parent)) && worker_matches_capture?(target, archive)
+
+            remove(target)
+            restore(@ready, target)
+            worker_matches_capture?(target, archive)
+          end
+          return if verified
+
+          remove(target)
+          raise ArgumentError, "could not recover a verified PostgreSQL worker database for this run"
+        end
+
+        def worker_matches_capture?(target, archive)
+          snapshot_identity(target, archive) { dump(target, archive) } == @capture_identity
+        rescue ArgumentError
+          false
+        end
+
+        def snapshot_identity(database, archive = @ready)
+          return unless @cache_scope
+
+          properties = cache_connection(database) { |session| PostgreSQLTemplateCache.snapshot_properties(session) }
+          return unless properties
+
+          yield if block_given?
+          PostgreSQLTemplateCache.archive_identity(properties, archive)
+        end
+
+        def cache_connection(database, &)
+          require "pg"
+          require_relative "postgresql_template_cache"
+
+          ::PG.connect(connection_options.merge(dbname: database), &)
+        rescue LoadError, ::PG::Error
+          nil
+        end
 
         def template_available?
           sql(<<~SQL).strip == "t"
@@ -219,9 +339,9 @@ module Ripr
           false
         end
 
-        def clone_database(database, template)
+        def clone_database(database, quoted_template, query = method(:sql))
           create_database(database) do
-            sql("CREATE DATABASE #{identifier(database)} TEMPLATE #{identifier(template)}")
+            query.call("CREATE DATABASE #{identifier(database)} TEMPLATE #{quoted_template}")
           end
           true
         rescue ArgumentError => e
@@ -271,10 +391,13 @@ module Ripr
           '"'
         end
 
+        def connection_options
+          { host: @config[:host], port: @config[:port], user: @config[:username], password: @config[:password],
+            sslmode: @config[:sslmode], connect_timeout: 5 }.compact.transform_values(&:to_s)
+        end
+
         def environment
-          { "PGHOST" => @config[:host], "PGPORT" => @config[:port], "PGUSER" => @config[:username],
-            "PGPASSWORD" => @config[:password], "PGSSLMODE" => @config[:sslmode] }.compact.transform_values(&:to_s)
-            .merge("PGCONNECT_TIMEOUT" => "5")
+          connection_options.to_h { |option, value| [CONNECTION_ENV.fetch(option), value] }
         end
       end
 
