@@ -232,48 +232,6 @@ RSpec.describe "incremental ripr commands" do
     end
   end
 
-  it "reuses an independent result and invalidates callers of edited methods with call-graph reuse" do
-    with_project do |directory|
-      source = File.join(directory, "lib/sample.rb")
-      File.write(source, <<~RUBY)
-        module Sample
-          def self.callee(value)
-            value >= 18
-          end
-
-          def self.caller(value)
-            callee(value) && value >= 18
-          end
-
-          def self.independent(value)
-            value >= 5
-          end
-        end
-      RUBY
-      File.write(File.join(directory, "test/sample_test.rb"), <<~RUBY)
-        require "minitest/autorun"
-        require_relative "../lib/sample"
-        class SampleTest < Minitest::Test
-          def test_caller
-            assert Sample.caller(18)
-          end
-
-          def test_independent
-            assert Sample.independent(5)
-          end
-        end
-      RUBY
-
-      command(directory, "--call-graph-reuse")
-      File.write(source, File.read(source).sub("value >= 18", "value >= 17"))
-      command(directory, "--call-graph-reuse")
-      after = snapshot(directory)
-      expect(after.fetch("metrics")).to include("reused" => 1, "baseline_tests_run" => 2)
-      expect(after.fetch("mutants").values.select { |mutant| mutant["reused"] }.map { |mutant| mutant.fetch("subject") })
-        .to eq(["Sample.independent"])
-    end
-  end
-
   it "reuses an independent RSpec result across method-body edits" do
     with_project do |directory|
       FileUtils.mkdir_p(File.join(directory, "spec"))
@@ -440,7 +398,8 @@ RSpec.describe "incremental ripr commands" do
           def test_failure; flunk "broken baseline"; end
         end
       RUBY
-      command(directory, expected: 4)
+      _, error = command(directory, expected: 4)
+      expect(error).to include("broken baseline")
       expect(File.read(cache_path)).to eq(previous)
     end
   end

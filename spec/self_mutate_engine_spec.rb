@@ -11,14 +11,49 @@ RSpec.describe "Engine and runtime self-mutation" do
   let(:script) { File.join(root, "script/self_mutate_engine.rb") }
 
   it "runs known Engine and runtime variants with the same suites as their original sources" do
-    output, error, status = Open3.capture3(RbConfig.ruby, script, "--jobs", "2",
-                                           "--only", "9b991da16a", "--only", "fca8dc001e", chdir: root)
+    options = ["--jobs", "2", "--only", "9b991da16a", "--only", "fca8dc001e"]
+    output, error, status = Open3.capture3(RbConfig.ruby, script, *options, chdir: root)
 
     expect(status).to be_success, error
     report = JSON.parse(output)
     expect(report.fetch("mutants").map { |result| result.values_at("id", "status") })
       .to contain_exactly(%w[9b991da16a killed], %w[fca8dc001e killed])
     expect(report.fetch("baselines").values).to all(include("status" => "passed"))
+
+    Dir.mktmpdir("ripr-engine-shards") do |directory|
+      paths = (1..2).map do |index|
+        output, error, status = Open3.capture3(RbConfig.ruby, script, *options, "--shard", "#{index}/2", chdir: root)
+        expect(status).to be_success, error
+        expect(JSON.parse(output).fetch("mutants").size).to eq(1)
+        path = File.join(directory, "#{index}.json")
+        File.write(path, output)
+        path
+      end
+
+      merge = ->(files) { Open3.capture3(RbConfig.ruby, script, *options, "--merge", *files, chdir: root) }
+      output, error, status = merge.call(paths.reverse)
+      expect(status).to be_success, error
+      merged = JSON.parse(output)
+      expect(merged.fetch("summary")).to eq(report.fetch("summary"))
+      expect(merged.fetch("mutants").map { |result| result.values_at("full_id", "status") })
+        .to eq(report.fetch("mutants").map { |result| result.values_at("full_id", "status") })
+      expect(merged.fetch("baselines").keys).to match_array(report.fetch("baselines").keys)
+
+      [paths.take(1), [paths.first, paths.first], [*paths, paths.first]].each do |incomplete|
+        output, error, status = merge.call(incomplete)
+        expect(status).not_to be_success
+        expect(output).to be_empty
+        expect(error).to include("mutation inventory")
+      end
+
+      stale = JSON.parse(File.read(paths.first))
+      stale.fetch("mutants").first["original"] = "older source"
+      File.write(paths.first, JSON.generate(stale))
+      output, error, status = merge.call(paths)
+      expect(status).not_to be_success
+      expect(output).to be_empty
+      expect(error).to include("mutation inventory")
+    end
   end
 
   it "distinguishes an example failure, an error loading specs, a crashed process, and a timeout" do
