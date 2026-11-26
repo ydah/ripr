@@ -52,9 +52,9 @@ RSpec.describe "ripr reach-map" do
     end
   end
 
-  def capture(directory, *arguments, loader: nil)
-    Open3.capture3({ "RIPR_LOADER" => loader, "REACH_MAP_TEST_SECRET" => "fixture-input" }, RbConfig.ruby, executable, "reach-map",
-                   *arguments, chdir: directory)
+  def capture(directory, *arguments, loader: nil, ruby_args: [])
+    Open3.capture3({ "RIPR_LOADER" => loader, "REACH_MAP_TEST_SECRET" => "fixture-input" }, RbConfig.ruby, *ruby_args, executable,
+                   "reach-map", *arguments, chdir: directory)
   end
 
   def artifact(directory)
@@ -89,6 +89,29 @@ RSpec.describe "ripr reach-map" do
         expect(map.fetch("unattributed").map { |key| key.split(":").last }).to eq(["startup"])
         expect(File).not_to exist(File.join(directory, ".ripr/snapshot.json"))
       end
+    end
+  end
+
+  it "honors a higher timeout base when recording a reach map" do
+    clock = <<~RUBY
+      Process.singleton_class.prepend(Module.new do
+        def clock_gettime(clock, *)
+          value = super
+          clock == Process::CLOCK_MONOTONIC ? value * 1000 : value
+        end
+      end)
+    RUBY
+    slow_tests = test_code.sub("assert_equal(3, Sample.calculate)", "(sleep 0.2; assert_equal(3, Sample.calculate))")
+    with_project("clock.rb" => clock, "lib/sample.rb" => source, "test/sample_test.rb" => slow_tests) do |directory|
+      ruby_args = ["-r", File.join(directory, "clock.rb")]
+      _, error, status = capture(directory, ruby_args: ruby_args)
+      expect(status.exitstatus).to eq(4)
+      expect(error).to include("baseline failed: timeout")
+      expect(File).not_to exist(artifact(directory))
+
+      _, error, status = capture(directory, "--timeout-base", "5000000", ruby_args: ruby_args)
+      expect(status.exitstatus).to eq(0), error
+      expect(JSON.parse(File.read(artifact(directory))).fetch("tests").keys).to eq(%w[SampleTest#test_calculate SampleTest#test_positive])
     end
   end
 
