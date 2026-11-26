@@ -345,7 +345,7 @@ RSpec.describe Ripr::Engine::MethodExits do
     expect(result.fetch("propagation")).to include("call" => 2, "original" => ["not_called"], "mutant" => returned(1))
   end
 
-  it "keeps observations immutable and abandons a subject that exceeds the call budget" do
+  it "compares completed exits across the call budget without inferring missing calls" do
     instance = subject_class.new
     targets = { "Sample#compute" => instance.method(:compute) }
     _, observations = described_class.observe(targets) { as_test("small") { instance.compute([+"entry"]) } }
@@ -353,10 +353,29 @@ RSpec.describe Ripr::Engine::MethodExits do
     expect(observations.fetch("Sample#compute")).to be_frozen
     expect(observations.fetch("Sample#compute").fetch("small")).to be_frozen
 
-    _, overflow = described_class.observe(targets) do
-      as_test("large") { (described_class::MAX_CALLS_PER_TEST + 1).times { instance.compute(false) } }
+    limit = described_class::MAX_CALLS_PER_TEST
+    capture = lambda do |first, count|
+      described_class.observe(targets) do
+        as_test("large") do
+          instance.compute(first)
+          (count - 1).times { instance.compute(false) }
+        end
+      end.last
     end
-    expect(overflow).to eq("Sample#compute" => nil)
+
+    original = capture.call(false, limit + 1)
+    repeat = capture.call(false, limit + 1)
+    stable = described_class.stable(original, repeat).fetch("Sample#compute")
+    changed = JSON.parse(JSON.generate(capture.call(true, limit + 1))).fetch("Sample#compute")
+    shorter = capture.call(false, limit - 1).fetch("Sample#compute")
+
+    expect(described_class.compare(stable, changed, ["large"])).to eq(
+      "status" => "not_revealed",
+      "propagation" => { "test_id" => "large", "call" => 1, "original" => returned(false), "mutant" => returned(true) }
+    )
+    expect(described_class.compare(stable, original.fetch("Sample#compute"), ["large"])).to be_nil
+    expect(described_class.compare(stable, shorter, ["large"])).to be_nil
+    expect(described_class.compare(shorter, stable, ["large"])).to be_nil
   end
 
   it "traces a method compiled by the instrumenting loader in the baseline and its fork" do
@@ -446,6 +465,8 @@ RSpec.describe Ripr::Engine::MethodExits do
       as_test("overflow") { 33.times { instance.value } }
     end
 
-    expect(observations).to eq("value" => { "complete" => [["return", ["Integer", 1]]] })
+    stable = exits.stable(observations, observations).fetch("value")
+    expect(stable.keys).to contain_exactly("complete", "overflow")
+    expect(exits.compare(stable, observations.fetch("value"), ["overflow"])).to be_nil
   end
 end

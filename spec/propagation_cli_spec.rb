@@ -180,7 +180,11 @@ RSpec.describe "method-exit mutation diagnosis" do
         "test_id" => "SampleTest#test_a_short", "call" => 1,
         "original" => ["return", ["TrueClass", true]], "mutant" => ["return", ["FalseClass", false]]
       )
-      expect(gaps.fetch("Sample.unobserved")).to include("stage" => "not_detected")
+      expect(gaps.fetch("Sample.unobserved")).to include("stage" => "not_revealed")
+      expect(gaps.fetch("Sample.unobserved").fetch("propagation")).to include(
+        "test_id" => "SampleTest#test_z_long", "call" => 1,
+        "original" => ["return", ["TrueClass", true]], "mutant" => ["return", ["FalseClass", false]]
+      )
       expect(report.fetch("summary")).to include("killed" => 0, "error" => 0, "timeout" => 0, "survived" => 2)
     end
   end
