@@ -140,6 +140,7 @@ module Ripr
         end
         contextual_variants("condition_negation", node, ast_path, context)
         contextual_variants("case_when", node, ast_path, context)
+        contextual_variants("case_in", node, ast_path, context)
       end
 
       def walk(node, ast_path, context, depth, parent = nil)
@@ -155,6 +156,7 @@ module Ripr
           add(node, ast_path, operator, replacement, location, context)
         end
         contextual_variants("case_when", node, ast_path, context)
+        contextual_variants("case_in", node, ast_path, context)
         contextual_variants("condition_negation", node, ast_path, context)
         if node.is_a?(Prism::StatementsNode) && @operators.include?("statement_removal")
           definition = Operators.fetch("statement_removal")
@@ -267,7 +269,11 @@ module Ripr
           mutant[:original_operator] = node.name.to_s
           mutant[:fixed_operands] = [node.receiver, node.arguments.arguments.first].map { |operand| fixed_operand?(operand) }
         end
-        mutant[:invalid] = true if Prism.parse(Instrumenter.mutate(@source, mutant)).failure?
+        if Prism.parse(Instrumenter.mutate(@source, mutant)).failure?
+          return if definition.instrument_template == :pattern
+
+          mutant[:invalid] = true
+        end
         @mutants << mutant
         site = @sites.find { |entry| entry[:key] == key }
         unless site

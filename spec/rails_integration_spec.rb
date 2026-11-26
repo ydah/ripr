@@ -135,6 +135,53 @@ if ENV["RIPR_TEST_RAILS"]
       expect(created_test_database).to be(false)
     end
 
+    it "restores the same Rails test database and worker identity on repeated baselines" do
+      code, report, created_test_database = run_fixture(<<~RUBY)
+        require "ripr/cli"
+        require "stringio"
+
+        File.open("app/models/widget.rb", "a") do |file|
+          file.puts <<~MODEL
+            class Widget
+              def available?
+                stock >= 1
+              end
+            end
+          MODEL
+        end
+        File.write("test/widget_test.rb", <<~TEST)
+          require_relative "../config/environment"
+          require "rails/test_help"
+
+          class WidgetTest < ActiveSupport::TestCase
+            self.use_transactional_tests = false
+
+            def test_stocked
+              assert_equal "", ENV.fetch("TEST_ENV_NUMBER")
+              assert_equal ["booted"], Widget.order(:id).pluck(:label)
+              Widget.create!(label: "worker write", stock: 1)
+              Widget.new(stock: 1).stocked?
+            end
+
+            def test_available
+              assert_equal "", ENV.fetch("TEST_ENV_NUMBER")
+              Widget.new(stock: 1).available?
+            end
+          end
+        TEST
+
+        output = StringIO.new
+        args = %w[--rails --baseline-runs 2 --operators comparison --jobs 2 --reporter agent]
+        status = Ripr::CLI.start(args, stdout: output)
+        puts JSON.generate([status, JSON.parse(output.string), File.exist?("test.sqlite3")])
+      RUBY
+
+      expect(code).to eq(0)
+      expect(report.fetch("run").fetch("metrics")).to include("baseline_tests_run" => 4, "reused" => 0)
+      expect(report.fetch("summary")).to include("killed" => 0, "survived" => 2, "timeout" => 0, "error" => 0)
+      expect(created_test_database).to be(false)
+    end
+
     it "switches a Rails scope's lambda body without static mutations" do
       status, mutants = run_fixture(<<~RUBY)
         require "ripr/cli"
@@ -194,6 +241,39 @@ if ENV["RIPR_TEST_RAILS"]
       RUBY
 
       expect(counts).to eq([2, 1, 1])
+    end
+
+    it "reuses a sharded baseline with a matching Rails SQLite snapshot" do
+      counts, reports, original_database = run_fixture(<<~RUBY)
+        require "json"
+        require "open3"
+        require "rbconfig"
+
+        File.write(".gitignore", "/tmp/\n/log/\n/.ripr/\n")
+        system("git", "init", "-q", exception: true)
+        system("git", "-c", "maintenance.auto=false", "add", ".", exception: true)
+        system("git", "-c", "maintenance.auto=false", "-c", "user.name=Ripr Test", "-c", "user.email=test@example.test",
+               "commit", "-qm", "fixture", exception: true)
+
+        command = ->(args) do
+          output, error, status = Open3.capture3(RbConfig.ruby, #{File.expand_path('../exe/ripr', __dir__).dump},
+                                                *args, "--rails", "--operators", "comparison", "--jobs", "2")
+          raise error unless status.success?
+
+          output
+        end
+        command.call(%w[shard-plan 2])
+        plan = JSON.parse(File.read(".ripr/shard-plan.json"))
+        reports = (1..2).map do |index|
+          JSON.parse(command.call(["--shard", "\#{index}/2", "--reporter", "agent"]))
+        end
+        puts JSON.generate([plan.dig("report", "run", "metrics", "baseline_tests_run"), reports, File.exist?("test.sqlite3")])
+      RUBY
+
+      expect(counts).to eq(1)
+      expect(reports.map { |report| report.dig("run", "metrics", "baseline_tests_run") }).to eq([0, 0])
+      expect(reports.sum { |report| report.dig("summary", "killed") }).to eq(1)
+      expect(original_database).to be(false)
     end
 
     if (postgresql_url = ENV.fetch("RIPR_TEST_POSTGRESQL", nil))
