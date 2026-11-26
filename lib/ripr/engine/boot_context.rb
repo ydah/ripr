@@ -54,10 +54,21 @@ module Ripr
         @observed = true
         return yield if @opaque
 
+        query_traces = []
+        %i[glob []].each do |call|
+          target = Dir.method(call)
+          next unless target.source_location&.first == "<internal:dir>"
+
+          query_trace = TracePoint.new(:return) { |event| inspect_event(event) unless @opaque }
+          query_traces << query_trace
+          query_trace.enable(target:)
+        end
         trace = TracePoint.new(:call, :b_call, :c_call, :c_return, :script_compiled) do |event|
           inspect_event(event) unless @opaque
         end
         trace.enable(&)
+      ensure
+        query_traces&.reverse_each(&:disable)
       end
 
       def fingerprint(sqlite_snapshots: nil)
@@ -91,10 +102,13 @@ module Ripr
       private
 
       def inspect_event(event)
-        if event.event == :script_compiled
+        case event.event
+        when :script_compiled
           observe_script(event)
-        elsif event.event == :c_return
+        when :c_return
           observe_input(event)
+        when :return
+          observe_query(event) if project_invocation?(event.path)
         else
           observe_source(event) unless event.event == :c_call
           @opaque = opaque_event?(event)
@@ -135,10 +149,15 @@ module Ripr
           @opaque = true if IS_A.bind_call(receiver, IO) && !IS_A.bind_call(receiver, File)
           record_input(call, event.return_value) unless @opaque
         elsif project_path?(event.path) && (FILE_QUERIES.include?(call) || DIRECTORY_QUERIES.include?(call))
-          value = event.return_value
-          @opaque = true if value.nil? && %i[glob [] entries children].include?(call)
-          record_input(call, value) unless @opaque
+          observe_query(event)
         end
+      end
+
+      def observe_query(event)
+        call = event.method_id
+        value = event.return_value
+        @opaque = true if value.nil? && %i[glob [] entries children].include?(call)
+        record_input(call, value) unless @opaque
       end
 
       def record_input(call, value)
