@@ -49,7 +49,7 @@ module Ripr
         @profile = Profile.new
       end
 
-      def plan
+      def plan(skipped: nil)
         return @mutants if @planned
 
         started = @profile&.now
@@ -64,7 +64,8 @@ module Ripr
         files.reject! { |path| @config[:exclude].any? { |pattern| File.fnmatch?(pattern, path, File::FNM_PATHNAME) } }
         files.each do |path|
           analysis = Core::Analyzer.call(
-            File.binread(path), path, operators: @config[:operators], arid_callees: @config[:arid_callees], static: @config[:static]
+            File.binread(path), path,
+            operators: @config[:operators], arid_callees: @config[:arid_callees], static: @config[:static], skipped: skipped
           )
           source = @sources[path] = analysis.fetch(:source)
           instrument_started = @profile&.now
@@ -74,8 +75,11 @@ module Ripr
           @table.merge!(instrumented.fetch(:site_table))
           unsupported = instrumented.fetch(:invalid)
           planned = analysis.fetch(:mutants).map do |mutant|
-            invalid = unsupported.include?(mutant.fetch(:id)) || mutant[:invalid]
-            Mutant.from_analysis(mutant, invalid: invalid)
+            reason = if mutant[:invalid] then "replacement is invalid Ruby"
+                     elsif unsupported.include?(mutant.fetch(:id)) then "unsupported instrumentation"
+                     end
+            mutant = mutant.merge(invalid_reason: reason) if reason
+            Mutant.from_analysis(mutant, invalid: reason ? true : nil)
           end
           @mutants.concat(planned)
           @warnings.concat(analysis.fetch(:warnings) + instrumented.fetch(:warnings))
@@ -94,6 +98,7 @@ module Ripr
           end
         end
         @mutants.freeze
+        collect_skipped_mutants(skipped) if skipped
         @planned = true
         @profile&.phase("plan", started)
         @mutants
@@ -150,6 +155,16 @@ module Ripr
 
       private
 
+      def collect_skipped_mutants(skipped)
+        @mutants.each do |mutant|
+          reason = mutant.accepted ? "accepted: #{mutant.accepted}" : mutant.invalid_reason
+          next unless reason
+
+          location = mutant.location
+          skipped << [location.file, location.line, location.column, reason]
+        end
+      end
+
       def select_mutants
         started = @profile&.now
         candidates = select_ids(@mutants)
@@ -166,7 +181,7 @@ module Ripr
         return if @config[:baseline_runs] > 1
 
         require_relative "../core/call_graph"
-        @call_graph = Core::CallGraph.new(@sources)
+        @call_graph = Core::CallGraph.new(@sources, rails: @config[:rails])
       end
 
       def prepare_reach_selection(selection)
@@ -201,6 +216,10 @@ module Ripr
       def run_project(selection, &)
         probe_table = @table.slice(*selection.observed.map(&:site).uniq)
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        if @config[:boot] || @config[:rails]
+          require_relative "boot_context"
+          @boot_context = BootContext.new(boot: @config[:boot], rails: @config[:rails], source_paths: @sources.keys)
+        end
         with_project(probe: Probe.new(probe_table, samples: @config[:samples]), observer: @reach_selection) do |adapter|
           boot_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000
           load_reached = R.probe.snapshot.fetch("load_reached")
@@ -211,12 +230,13 @@ module Ripr
                             @config.with_worker_limit { WorkerMemory.limit }
                           end
           prepare_rails_workers([worker_config[:jobs], selection.observed.length].min, observer: @reach_selection)
+          boot_digest = @boot_context&.fingerprint(sqlite_snapshots: @rails&.cache_snapshot_paths)
           @profile&.phase("boot", started)
           baseline_started = @profile&.now
           method_hashes = @mutants.to_h { |mutant| [mutant.full_id, mutant.method_hash] }
           @cache = ResultCache.new(@config, sources: @sources, test_files: @test_files, framework: @framework, method_hashes:,
                                             test_ids: adapter.tests.map { |test| test.fetch("id") }, probe_sites: probe_table.keys,
-                                            graph: @call_graph, load_dependencies: @load_dependencies)
+                                            graph: @call_graph, load_dependencies: @load_dependencies, boot_digest: boot_digest)
           Process.warmup
           prepare_baseline(adapter, probe_table, load_reached)
           @profile&.phase("baseline", baseline_started)
@@ -263,7 +283,7 @@ module Ripr
         if @config[:rails]
           require_relative "../integration/rails"
           @rails = Integration::Rails.new(boot: @config[:boot])
-          capture_load_output { @rails.prepare }
+          capture_load_output { observe_boot { @rails.prepare } }
         end
         reject_preloaded_sources
         @loader = Loader.new(@codes).install
@@ -274,13 +294,17 @@ module Ripr
           R.activate(site, @table.fetch(site).index(active.id) + 1)
         end
         if @rails
-          capture_load_output { @rails.boot }
+          capture_load_output { observe_boot { @rails.boot } }
         elsif (boot = @config[:boot])
           raise ArgumentError, "boot file does not exist: #{boot}" unless File.file?(boot)
 
-          capture_load_output { require File.expand_path(boot) }
+          capture_load_output { observe_boot { require File.expand_path(boot) } }
         end
-        load_tests
+        observe_boot { load_tests }
+      end
+
+      def observe_boot(&)
+        @boot_context ? @boot_context.observe(&) : yield
       end
 
       def reject_preloaded_sources
@@ -397,10 +421,11 @@ module Ripr
                     Integration::Minitest.new(files, seed: @config[:seed])
                   end
         capture_load_output do
-          if @call_graph
+          if @call_graph && !@boot_context
             _, @load_dependencies = @call_graph.trace { adapter.load }
           else
             adapter.load
+            @load_dependencies = [] if @boot_context
           end
         end
         raise BaselineFailure, "no tests were discovered" if adapter.tests.empty?

@@ -10,15 +10,91 @@ if ENV["RIPR_TEST_RAILS"]
   RSpec.describe "Rails integration" do
     let(:lib) { File.expand_path("../lib", __dir__) }
     let(:fixture) { File.expand_path("../test/fixtures/projects/rails_app", __dir__) }
+    let(:executable) { File.expand_path("../exe/ripr", __dir__) }
 
-    def run_fixture(script, url: nil)
+    def with_rails_project
       Dir.mktmpdir("ripr-rails-spec") do |directory|
         FileUtils.cp_r(File.join(fixture, "."), directory)
+        yield directory
+      end
+    end
+
+    def cache_snapshot(directory, *options)
+      environment = { "RAILS_ENV" => nil, "RACK_ENV" => nil, "DISABLE_SPRING" => nil, "DATABASE_URL" => nil,
+                      "PRIMARY_DATABASE_URL" => nil, "RIPR_TEST_DATABASE_URL" => nil, "RIPR_BOOT_SECRET" => "test secret value" }
+      output, error, status = Open3.capture3(environment, RbConfig.ruby, executable, *options, "--rails", "--jobs", "1",
+                                             "--operators", "comparison", "--reporter", "agent", chdir: directory)
+      expect(status.success?).to be(true), "#{output}\n#{error}"
+      snapshot = File.read(File.join(directory, ".ripr/snapshot.json"))
+      expect(snapshot).not_to include("test secret value")
+      JSON.parse(snapshot)
+    end
+
+    def run_fixture(script, url: nil)
+      with_rails_project do |directory|
         environment = { "RAILS_ENV" => nil, "RACK_ENV" => nil, "DISABLE_SPRING" => "0", "RIPR_TEST_DATABASE_URL" => url,
                         "DATABASE_URL" => nil, "PRIMARY_DATABASE_URL" => nil }
         output, error, status = Open3.capture3(environment, RbConfig.ruby, "-I", lib, "-e", script, chdir: directory)
         expect(status.success?).to be(true), "#{output}\n#{error}"
         JSON.parse(output)
+      end
+    end
+
+    it "reuses Rails SQLite results and invalidates changed startup and database inputs" do
+      require "sqlite3"
+
+      with_rails_project do |directory|
+        initial = cache_snapshot(directory)
+        expect(initial.fetch("metrics")).to include("baseline_tests_run" => 1, "reused" => 0)
+        cache_snapshot(directory)
+        unchanged = cache_snapshot(directory)
+        expect(unchanged.fetch("metrics")).to include("baseline_tests_run" => 0, "reused" => 1)
+
+        %w[config/initializers/cache_test.rb db/schema.rb test/fixtures/widgets.yml test/cache_helper.rb].each do |path|
+          full_path = File.join(directory, path)
+          FileUtils.mkdir_p(File.dirname(full_path))
+          File.write(full_path, "# changed cache input\n")
+          expect(cache_snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 1, "reused" => 0)
+        end
+
+        SQLite3::Database.new(File.join(directory, "test.sqlite3")) do |database|
+          database.execute("CREATE TABLE seed_marker (id integer)")
+        end
+        expect(cache_snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 1, "reused" => 0)
+      end
+    end
+
+    it "reuses independent Rails results across same-layout method body edits" do
+      with_rails_project do |directory|
+        source = File.join(directory, "app/models/widget.rb")
+        File.write(source, File.read(source).sub(/\nend\n\z/, <<~RUBY))
+
+            def overstocked?
+              stock >= 12
+            end
+          end
+        RUBY
+        test = File.join(directory, "test/widget_test.rb")
+        File.write(test, File.read(test).sub(/\nend\n\z/, <<~RUBY))
+
+            def test_overstocked
+              assert Widget.new(stock: 12).overstocked?
+            end
+          end
+        RUBY
+
+        cache_snapshot(directory, "--call-graph-reuse")
+        cache_snapshot(directory, "--call-graph-reuse")
+        File.write(source, File.read(source).sub("stock >= 12", "stock >= 11"))
+        after = cache_snapshot(directory, "--call-graph-reuse")
+        expect(after.fetch("metrics")).to include("baseline_tests_run" => 2, "reused" => 1)
+        expect(after.fetch("mutants").values.select { |mutant| mutant["reused"] }.map { |mutant| mutant.fetch("subject") })
+          .to eq(["Widget#stocked?"])
+
+        File.open(test, "a") { |file| file.puts("\nWidget.new(stock: 12).overstocked?") }
+        cache_snapshot(directory, "--call-graph-reuse")
+        File.write(source, File.read(source).sub("stock >= 11", "stock >= 10"))
+        expect(cache_snapshot(directory, "--call-graph-reuse").fetch("metrics")).to include("baseline_tests_run" => 2, "reused" => 0)
       end
     end
 
@@ -104,6 +180,34 @@ if ENV["RIPR_TEST_RAILS"]
       expect(report.fetch("run").fetch("metrics")).to include("baseline_tests_run" => 4, "reused" => 0)
       expect(report.fetch("summary")).to include("killed" => 0, "survived" => 2, "timeout" => 0, "error" => 0)
       expect(created_test_database).to be(false)
+    end
+
+    it "switches a Rails scope's lambda body without static mutations" do
+      status, mutants = run_fixture(<<~RUBY)
+        require "ripr/cli"
+        require "stringio"
+
+        model = "app/models/widget.rb"
+        File.write(model, File.read(model).sub("  MINIMUM_STOCK = 1", <<~SCOPE))
+          MINIMUM_STOCK = 1
+          minimum = 10
+          scope :enough_stock, ->(extra: 2) { where(stock: minimum + extra) }
+        SCOPE
+        test = "test/widget_test.rb"
+        File.write(test, File.read(test).sub("  def test_stocked", <<~TEST))
+          def test_stocked
+            assert_equal ["booted"], Widget.enough_stock.pluck(:label)
+        TEST
+        output = StringIO.new
+        code = Ripr::CLI.start(%w[--rails --jobs 1 --operators arithmetic --reporter agent], stdout: output)
+        snapshot = JSON.parse(File.read(".ripr/snapshot.json"))
+        puts JSON.generate([code, snapshot.fetch("mutants").values])
+      RUBY
+
+      expect(status).to eq(0)
+      expect(mutants).to contain_exactly(
+        include("subject" => "Widget#<lambda>", "status" => "killed", "load_reached" => false, "killed_by" => "WidgetTest#test_stocked")
+      )
     end
 
     it "copies captured SQLite snapshots without acquiring a database lock" do
@@ -240,6 +344,8 @@ if ENV["RIPR_TEST_RAILS"]
           parent_database = ActiveRecord::Base.connection_db_config.database
           Widget.create!(label: "before fork", stock: 1)
           rails.prepare_workers(2)
+          snapshots = rails.cache_snapshot_paths
+          cacheable_database = snapshots && snapshots.size == 2 && snapshots.all? { |path| File.file?(path) }
 
           workers = [0, 1].map do |slot|
             fork do
@@ -278,16 +384,17 @@ if ENV["RIPR_TEST_RAILS"]
           rails.close
           source_unchanged = !File.exist?("test.sqlite3") || File.size("test.sqlite3").zero?
           puts JSON.generate([parent_database, *[0, 1].map { |slot| JSON.parse(File.read("worker-#{slot}.json")) },
-                              JSON.parse(File.read("fresh.json")), source_unchanged, ENV["DISABLE_SPRING"]])
+                              JSON.parse(File.read("fresh.json")), source_unchanged, ENV["DISABLE_SPRING"], cacheable_database])
         RUBY
 
-        parent, first, second, fresh, source_unchanged, spring = result
+        parent, first, second, fresh, source_unchanged, spring, cacheable_database = result
         expect([parent, first.first, second.first].uniq.size).to eq(3)
         expect(first.drop(1)).to eq([2, 3])
         expect(second.drop(1)).to eq([2, 3])
         expect(fresh).to eq([first.first, 1])
         expect(source_unchanged).to be(true)
         expect(spring).to eq("0")
+        expect(cacheable_database).to eq(adapter == "sqlite" ? true : nil)
       end
     end
   end
