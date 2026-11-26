@@ -67,6 +67,12 @@ module Ripr
         @databases.values.any?(&:server?) ? 30_000 : 0
       end
 
+      def cache_snapshot_paths
+        return if @inherited || @databases.values.any?(&:server?)
+
+        @databases.values.flat_map(&:snapshot_paths)
+      end
+
       def with_worker(slot, fresh_boot: false)
         previous = ENV.fetch("TEST_ENV_NUMBER", nil)
         previous_manifest = ENV.fetch(WORKER_CONFIG, nil)

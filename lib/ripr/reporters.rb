@@ -37,7 +37,8 @@ module Ripr
         next unless ACTIONS.key?(kind)
 
         id = mutant.fetch("id")
-        hint = HINTS.fetch(status)
+        equivalence = equivalence_hint(mutant) if triage
+        hint = equivalence || HINTS.fetch(status)
         observed = mutant.fetch("observed", [])
         hint += " Observed operands: #{JSON.generate(observed)}." if status == "not_infected" && !observed.empty?
         suggestion = Core::InputSuggestions.for(mutant)
@@ -56,6 +57,7 @@ module Ripr
         if triage
           gap["stage"] = status
           gap["priority"] = triage.priorities.fetch(mutant.fetch("full_id"))
+          gap["equivalence_suspected"] = true if equivalence
         else
           gap["kind"] = kind
           gap["stage"] = status if diagnosed
@@ -82,6 +84,8 @@ module Ripr
           suggestion = Core::InputSuggestions.for(mutant)
           reason += ". #{suggestion_message(suggestion)}" if suggestion
           reason += ". #{propagation_message(mutant)}" if mutant["propagation"]
+          equivalence = equivalence_hint(mutant)
+          reason += ". #{equivalence}" if equivalence
           reason += ". #{load_note(mutant)}" if mutant["load_reached"]
           { "id" => mutant.fetch("id"), "mutatorName" => mutant.fetch("operator"), "replacement" => mutant.fetch("mutated"),
             "status" => MTE_STATUSES.fetch(mutant.fetch("status")), "statusReason" => reason,
@@ -165,6 +169,8 @@ module Ripr
                   "#{mutant['original'].inspect} → #{mutant['mutated'].inspect} id=#{mutant['id']}"
       stdout.puts "  observed: #{JSON.generate(mutant['observed'])}" unless mutant.fetch("observed", []).empty?
       stdout.puts "  #{propagation_message(mutant)}" if mutant["propagation"]
+      equivalence = equivalence_hint(mutant)
+      stdout.puts "  #{equivalence}" if equivalence
       if (suggestion = Core::InputSuggestions.for(mutant))
         stdout.puts "  suggested inputs: #{JSON.generate(suggestion.fetch(:inputs))}"
         stdout.puts "  #{suggestion[:reason]}" if suggestion[:reason]
@@ -183,6 +189,15 @@ module Ripr
 
     def self.suggestion_message(suggestion)
       ["Try operand pairs #{JSON.generate(suggestion.fetch(:inputs))}.", suggestion[:reason]].compact.join(" ")
+    end
+
+    def self.equivalence_hint(mutant)
+      return unless mutant.fetch("status") == "not_propagated"
+
+      count = mutant.fetch("covering_tests", []).uniq { |test| test.fetch("id") }.size
+      return if count < 3
+
+      "Possible equivalent mutation. Observed method exits matched in all #{count} covering tests. Review side effects before accepting."
     end
 
     def self.propagation_message(mutant)
@@ -205,7 +220,7 @@ module Ripr
       end
     end
 
-    private_class_method :suggestion_message, :propagation_message, :describe_exit, :write_text, :write_gap
+    private_class_method :suggestion_message, :equivalence_hint, :propagation_message, :describe_exit, :write_text, :write_gap
 
     def self.html(report)
       HTML.render(report)
