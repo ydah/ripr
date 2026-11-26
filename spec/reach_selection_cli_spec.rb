@@ -80,17 +80,183 @@ RSpec.describe "ripr reach-map selection" do
   def report(directory, base, *args, environment: {})
     output, error, status = run(directory, "--since", base, "--reporter", "agent", *args, environment: environment)
     expect(status.exitstatus).to eq(0), error
+    yield error if block_given?
     JSON.parse(output).tap do |result|
       result.fetch("gaps").each { |gap| gap.fetch("covering_tests").each { |test| test.delete("duration_ms") } }
     end
   end
 
-  def select_report(directory, base, *args, environment: {})
-    report(directory, base, "--reach-map", ".ripr/reach-map.json", *args, environment: environment)
+  def select_report(directory, base, *args, environment: {}, &)
+    report(directory, base, "--reach-map", ".ripr/reach-map.json", *args, environment: environment, &)
   end
 
   def baseline_count(report)
     report.dig("run", "metrics", "baseline_tests_run")
+  end
+
+  def with_load_audit
+    Dir.mktmpdir("ripr-reach-load-audit") do |directory|
+      script = <<~RUBY
+        require "coverage"
+        Coverage.start(lines: true)
+        at_exit do
+          executed = Coverage.peek_result.filter_map { |path, counts| path if counts.fetch(:lines).compact.any?(&:positive?) }
+          File.write(ENV.fetch("RIPR_LOAD_AUDIT"), executed.join("\\n"))
+        end
+      RUBY
+      write(directory, "audit.rb", script)
+      path = File.join(directory, "loaded")
+      yield({ "RUBYOPT" => [ENV.fetch("RUBYOPT", nil), "-r#{File.join(directory, 'audit.rb')}"].compact.join(" "),
+              "RIPR_LOAD_AUDIT" => path }, path)
+    end
+  end
+
+  %w[minitest rspec].each do |framework|
+    it "loads fewer #{framework} files when a trailing declaration is independent" do
+      files = if framework == "minitest"
+                first = minitest.sub("  def test_positive = assert(Sample.positive?)\n", "")
+                last = minitest.sub("  def test_calculate = assert_operator(Sample.calculate, :>=, 5)\n", "")
+                { "test/first_test.rb" => first, "test/last_test.rb" => last.sub("SampleTest", "LastTest") }
+              else
+                first = rspec.sub("describe Sample", 'describe "first"').sub(/  it\("is positive"\).*\n/, "")
+                last = rspec.sub("describe Sample", 'describe "last"').sub(/  it\("calculates"\).*\n/, "")
+                { "spec/first_spec.rb" => first, "spec/last_spec.rb" => last }
+              end
+      with_load_audit do |environment, audit|
+        with_project(files) do |directory|
+          base = capture(directory, environment: environment)
+          write(directory, "lib/sample.rb", source.sub("3 + 2", "4 + 2"))
+          commit(directory, "edit method") if framework == "rspec"
+
+          ineligible = File.realpath(File.join(directory, files.keys.last))
+          select_report(directory, base, "--reach-map-files", files.keys.first, environment: environment)
+          expect(File.readlines(audit, chomp: true)).to include(ineligible)
+
+          pattern = files.keys.last.sub("/last_", "/*ast_")
+          selected = select_report(directory, base, "--reach-map-files", pattern, "--reach-map-files", "unmatched/*",
+                                   environment: environment) do |diagnostic|
+            expect(diagnostic).not_to include("reach-map fallback")
+          end
+          expect(baseline_count(selected)).to eq(1)
+          expect(File.readlines(audit, chomp: true)).to include(File.realpath(File.join(directory, files.keys.first)))
+          expect(File.readlines(audit, chomp: true)).not_to include(File.realpath(File.join(directory, files.keys.last)))
+          expect(File).not_to exist(File.join(directory, ".ripr/snapshot.json"))
+          full = report(directory, base, environment: environment)
+          expect(selected.values_at("summary", "gaps")).to eq(full.values_at("summary", "gaps"))
+        end
+      end
+    end
+  end
+
+  it "retains a trailing RSpec file that registers a global hook" do
+    first = rspec.sub("describe Sample", 'describe "first"').sub(/  it\("is positive"\).*\n/, "")
+    first = first.sub("be >= 5", "be >= @minimum")
+    last = <<~RUBY
+      require "sample"
+      RSpec.configure { |config| config.before { @minimum = 5 } }
+      RSpec.describe "last" do
+        it("is positive") { expect(Sample.positive?).to be(true) }
+      end
+    RUBY
+    with_load_audit do |environment, audit|
+      with_project("spec/first_spec.rb" => first, "spec/last_spec.rb" => last) do |directory|
+        base = capture(directory, environment: environment)
+        write(directory, "lib/sample.rb", source.sub("3 + 2", "4 + 2"))
+        commit(directory, "edit method")
+
+        result = select_report(directory, base, "--reach-map-files", "spec/last_spec.rb", environment: environment) do |diagnostic|
+          expect(diagnostic).not_to include("reach-map fallback")
+        end
+        expect(baseline_count(result)).to eq(1)
+        expect(File.readlines(audit, chomp: true)).to include(File.realpath(File.join(directory, "spec/last_spec.rb")))
+      end
+    end
+  end
+
+  it "retains a trailing Minitest file that reopens a class from an earlier file" do
+    first = minitest.sub("  def test_positive = assert(Sample.positive?)\n", "") + <<~RUBY
+      class LastTest < Minitest::Test
+      end
+    RUBY
+    last = minitest.sub("  def test_calculate = assert_operator(Sample.calculate, :>=, 5)\n", "").sub("SampleTest", "LastTest")
+    with_load_audit do |environment, audit|
+      with_project("test/first_test.rb" => first, "test/last_test.rb" => last) do |directory|
+        base = capture(directory, environment: environment)
+        write(directory, "lib/sample.rb", source.sub("3 + 2", "4 + 2"))
+
+        result = select_report(directory, base, "--reach-map-files", "test/last_test.rb", environment: environment)
+        expect(baseline_count(result)).to eq(1)
+        expect(File.readlines(audit, chomp: true)).to include(File.realpath(File.join(directory, "test/last_test.rb")))
+      end
+    end
+  end
+
+  it "preserves Minitest verdicts when a retained test refers to the omitted class" do
+    first = minitest.sub("  def test_positive = assert(Sample.positive?)\n", "")
+    first = first.sub("assert_operator(Sample.calculate, :>=, 5)", "assert_operator(Sample.calculate, :>=, defined?(LastTest) ? 5 : 0)")
+    last = minitest.sub("  def test_calculate = assert_operator(Sample.calculate, :>=, 5)\n", "").sub("SampleTest", "LastTest")
+    with_load_audit do |environment, audit|
+      with_project("test/first_test.rb" => first, "test/last_test.rb" => last) do |directory|
+        base = capture(directory, environment: environment)
+        write(directory, "lib/sample.rb", source.sub("3 + 2", "4 + 2"))
+        full = report(directory, base, environment: environment)
+        selected = select_report(directory, base, "--reach-map-files", "test/last_test.rb", environment: environment)
+
+        expect(selected.values_at("summary", "gaps")).to eq(full.values_at("summary", "gaps"))
+        expect(baseline_count(selected)).to eq(1)
+        expect(File.readlines(audit, chomp: true)).to include(File.realpath(File.join(directory, "test/last_test.rb")))
+      end
+    end
+  end
+
+  it "preserves RSpec verdicts when a retained example reads the spec registry" do
+    first = rspec.sub("describe Sample", 'describe "first"').sub(/  it\("is positive"\).*\n/, "")
+    first = first.sub("be >= 5", "be >= (RSpec.world.example_groups.size > 1 ? 5 : 0)")
+    last = rspec.sub("describe Sample", 'describe "last"').sub(/  it\("calculates"\).*\n/, "")
+    with_load_audit do |environment, audit|
+      with_project("spec/first_spec.rb" => first, "spec/last_spec.rb" => last) do |directory|
+        base = capture(directory, environment: environment)
+        write(directory, "lib/sample.rb", source.sub("3 + 2", "4 + 2"))
+        commit(directory, "edit method")
+        full = report(directory, base, environment: environment)
+        selected = select_report(directory, base, "--reach-map-files", "spec/last_spec.rb", environment: environment)
+
+        expect(selected.values_at("summary", "gaps")).to eq(full.values_at("summary", "gaps"))
+        expect(baseline_count(selected)).to eq(1)
+        expect(File.readlines(audit, chomp: true)).to include(File.realpath(File.join(directory, "spec/last_spec.rb")))
+      end
+    end
+  end
+
+  it "restarts from the invoking directory and runs a full baseline after failed narrowing" do
+    first = minitest.sub("  def test_positive = assert(Sample.positive?)\n", "")
+    first = first.sub(":>=, 5", ':>=, Object.const_defined?(["Last", "Test"].join) ? 5 : 99')
+    first += <<~RUBY
+      raise "test loading changed the environment" if ENV["RIPR_RETRY_FIXTURE_STATE"]
+      ENV["RIPR_RETRY_FIXTURE_STATE"] = "started"
+    RUBY
+    last = <<~RUBY
+      require "minitest/autorun"
+      require "sample"
+      class LastTest < Minitest::Test
+        def test_positive = assert(Sample.positive?)
+      end
+    RUBY
+    with_load_audit do |environment, audit|
+      with_project("app/lib/sample.rb" => source, "app/test/first_test.rb" => first, "app/test/last_test.rb" => last) do |directory|
+        app = File.join(directory, "app")
+        base = capture(app, environment: environment)
+        write(app, "lib/sample.rb", source.sub("3 + 2", "4 + 2"))
+
+        output, error, status = run(directory, "--since", base, "--reporter", "agent", "--profile", "--reach-map",
+                                    ".ripr/reach-map.json", "--reach-map-files", "test/last_test.rb", "app", environment: environment)
+        expect(status.exitstatus).to eq(0), error
+        expect(error.scan("retrying with all test files").size).to eq(1)
+        expect(baseline_count(JSON.parse(output))).to eq(2)
+        expect(File.readlines(audit, chomp: true)).to include(File.realpath(File.join(app, "test/last_test.rb")))
+        expect(File).to exist(File.join(app, ".ripr/report/profile.json"))
+      end
+    end
   end
 
   %w[minitest rspec].each do |framework|
@@ -151,6 +317,18 @@ RSpec.describe "ripr reach-map selection" do
       base = capture(directory)
       write(directory, "lib/sample.rb", source.sub("3 + 2", "4 + 2"))
       expect(baseline_count(select_report(directory, base, environment: { "RIPR_SELECT_TEST_ENV" => "changed" }))).to eq(2)
+    end
+  end
+
+  it "selects baseline tests with a version 3 map" do
+    with_project("test/sample_test.rb" => minitest) do |directory|
+      base = capture(directory)
+      artifact = File.join(directory, ".ripr/reach-map.json")
+      data = JSON.parse(File.read(artifact)).merge("version" => 3).except("test_load_order")
+      File.write(artifact, JSON.generate(data))
+      write(directory, "lib/sample.rb", source.sub("3 + 2", "4 + 2"))
+
+      expect(baseline_count(select_report(directory, base, "--reach-map-files", "test/*_test.rb"))).to eq(1)
     end
   end
 

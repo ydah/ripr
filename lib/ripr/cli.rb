@@ -10,15 +10,17 @@ require_relative "snapshot"
 
 module Ripr
   class CLI
-    def self.start(arguments = ARGV, stdout: $stdout, stderr: $stderr)
-      new(arguments.dup, stdout, stderr).call
+    def self.start(arguments = ARGV, stdout: $stdout, stderr: $stderr, retry_full_suite: false, &restart)
+      new(arguments.dup, stdout, stderr, retry_full_suite: retry_full_suite, &restart).call
     end
 
-    def initialize(arguments, stdout, stderr)
+    def initialize(arguments, stdout, stderr, retry_full_suite: false, &restart)
       @arguments = arguments
       @stdout = stdout
       @stderr = stderr
       @overrides = {}
+      @restart = restart
+      @file_loading = retry_full_suite ? :full : (:prune if restart)
     end
 
     def call
@@ -36,6 +38,10 @@ module Ripr
         return Dir.chdir(root) { execute(command) }
       end
       execute(command)
+    rescue Engine::Runner::RetryFull => e
+      raise unless @restart
+
+      @restart.call(e.message)
     rescue OptionParser::ParseError, ArgumentError, Errno::ENOENT => e
       @stderr.puts "ripr: #{e.message}"
       1
@@ -55,6 +61,9 @@ module Ripr
         options.banner = "Usage: ripr [run|list|init|accept|init-skill|mcp|reach-map] [options] [PATHS...]"
         options.on("--since REF") { |v| @overrides[:since] = v }
         options.on("--reach-map FILE", "Select baseline tests for --since using a trusted reach map") { |v| @overrides[:reach_map] = v }
+        options.on("--reach-map-files GLOB", "Allow matching independent test files to be skipped (repeatable)") do |pattern|
+          (@overrides[:reach_map_files] ||= []) << pattern
+        end
         options.on("--scope SCOPE") { |v| @overrides[:scope] = v }
         options.on("--framework FRAMEWORK") { |v| @overrides[:framework] = v }
         options.on("--tests GLOB") { |v| (@overrides[:tests] ||= []) << v }
@@ -111,7 +120,7 @@ module Ripr
       end
       raise ArgumentError, "#{command} is not available yet" unless %w[run list].include?(command)
 
-      runner = Engine::Runner.new(config, @arguments)
+      runner = Engine::Runner.new(config, @arguments, file_loading: @file_loading)
       return list_skipped(runner) if @list_skipped
 
       runner.plan

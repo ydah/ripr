@@ -69,7 +69,7 @@ RSpec.describe "ripr reach-map" do
         expect(File).to exist(artifact(directory))
         raw = File.read(artifact(directory))
         map = JSON.parse(raw)
-        expect(map).to include("version" => 3, "base" => git(directory, "rev-parse", "HEAD"), "framework" => "minitest",
+        expect(map).to include("version" => 4, "base" => git(directory, "rev-parse", "HEAD"), "framework" => "minitest",
                                "opaque_load" => false, "opaque_tests" => [])
         expect(raw).not_to include(directory, "fixture-input")
         expect(map.fetch("tests")).to eq(
@@ -77,6 +77,7 @@ RSpec.describe "ripr reach-map" do
           "SampleTest#test_positive" => { "file" => "test/sample_test.rb", "line" => 5 }
         )
         expect(map.fetch("test_order")).to eq(%w[SampleTest#test_calculate SampleTest#test_positive])
+        expect(map.fetch("test_load_order")).to eq(["test/sample_test.rb"])
         expect(map.fetch("test_files")).to eq("test/sample_test.rb" => Digest::SHA256.hexdigest(test_code))
         expect(map.fetch("sources")).to eq("lib/sample.rb" => Digest::SHA256.hexdigest(source))
         expect(map.fetch("structure_hash")).to match(/\A[0-9a-f]{64}\z/)
@@ -106,6 +107,7 @@ RSpec.describe "ripr reach-map" do
       map = JSON.parse(File.read(artifact(directory)))
       expect(map.fetch("unattributed").map { |key| key.split(":").last }).to contain_exactly("startup", "calculate")
       expect(map.fetch("reach").transform_keys { |key| key.split(":").last }).to eq("positive?" => ["./spec/sample_spec.rb[1:1]"])
+      expect(map.fetch("test_load_order")).to eq(["spec/sample_spec.rb"])
       expect(map.fetch("test_files")).to include("spec/support/config.rb" => Digest::SHA256.hexdigest("# suite input\n"))
     end
   end

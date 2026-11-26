@@ -8,6 +8,8 @@ module Ripr
       class Unusable < Ripr::Error; end
 
       MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
+      FilePlan = Data.define(:tests, :ids)
+      private_constant :FilePlan
 
       def initialize(config, sources, mutants)
         if !config[:since] || config[:full] || config[:static] || config[:boot] || config[:include_tests_diff] || !config[:only].empty?
@@ -18,7 +20,9 @@ module Ripr
         raise Unusable, "artifact is missing or too large" unless File.file?(path) && File.size(path) <= MAX_ARTIFACT_BYTES
 
         @artifact = JSON.parse(File.binread(path, MAX_ARTIFACT_BYTES))
-        raise Unusable, "artifact version is unsupported" unless @artifact.is_a?(Hash) && @artifact["version"] == ReachMap::VERSION
+        unless @artifact.is_a?(Hash) && [3, ReachMap::VERSION].include?(@artifact["version"])
+          raise Unusable, "artifact version is unsupported"
+        end
         raise Unusable, "boot or test loading made an opaque observation" unless @artifact["opaque_load"] == false
 
         @git = Git.new
@@ -52,6 +56,25 @@ module Ripr
         @capture.capture(methods: false, &)
       end
 
+      def load_files(paths, framework, allowed:)
+        return paths unless @artifact["version"] == ReachMap::VERSION
+        return paths unless @artifact.values_at("test_load_order", "framework") == [paths, framework]
+
+        tests = @artifact.fetch("tests")
+        ids = select_ids(tests, paths, framework)
+        required = ids.map { |id| tests.fetch(id).fetch("file") }.uniq
+        return paths unless (required - paths).empty?
+
+        required |= paths - allowed
+        retained = paths.take(paths.rindex { |path| required.include?(path) } + 1)
+        return paths if retained == paths || !declaration_suffix?(retained, paths.drop(retained.size), tests, framework)
+
+        @file_plan = FilePlan.new(tests.select { |_, test| retained.include?(test.fetch("file")) }, ids)
+        retained
+      rescue Ripr::Error, SystemCallError, IOError, ArgumentError
+        paths
+      end
+
       def test_ids(discovered, framework:, paths:, rails:, load_reached:)
         if !load_reached.empty? || framework != @artifact["framework"] || !@capture.stable_inputs? ||
            !@capture.matching_load?(@artifact["load_reads"])
@@ -62,8 +85,18 @@ module Ripr
         raise Unusable, "Rails database inputs changed or are unknown" unless database && database == @artifact["database_inputs"]
 
         tests = discovered.to_h { |test| [test.fetch("id"), @capture.test_metadata(test)] }
-        raise Unusable, "discovered tests changed" unless tests == @artifact.fetch("tests")
+        raise Unusable, "discovered tests changed" unless tests == (@file_plan&.tests || @artifact.fetch("tests"))
 
+        @file_plan ? @file_plan.ids : select_ids(tests, paths, framework)
+      rescue Unusable
+        raise
+      rescue Ripr::Error, SystemCallError, IOError, ArgumentError => e
+        raise Unusable, "cannot validate the reach map (#{e.class})"
+      end
+
+      private
+
+      def select_ids(tests, paths, framework)
         files = @capture.test_inputs(paths + tests.values.map { |test| test.fetch("file") })
         changed_tests = validate_tests(files, tests, framework)
         changed_paths = @changed_source_paths | changed_tests
@@ -76,13 +109,109 @@ module Ripr
         raise Unusable, "the map cannot narrow this baseline" if selected.empty? || selected.size == tests.size
 
         selected
-      rescue Unusable
-        raise
-      rescue Ripr::Error, SystemCallError, IOError, ArgumentError => e
-        raise Unusable, "cannot validate the reach map (#{e.class})"
       end
 
-      private
+      def declaration_suffix?(retained, omitted, tests, framework)
+        retained_nodes = retained.map { |path| statements(path) }
+        imports = retained_nodes.flat_map { |nodes| nodes.take_while { |node| literal_require(node) }.map { |node| literal_require(node) } }
+        omitted_classes = []
+        omitted.each do |path|
+          nodes = statements(path)
+          requires = nodes.take_while { |node| literal_require(node) }
+          declarations = nodes.drop(requires.size)
+          return false if declarations.empty? || requires.any? { |node| !imports.include?(literal_require(node)) }
+
+          if framework == "minitest"
+            return false unless minitest_declarations?(path, declarations, tests)
+
+            omitted_classes.concat(declarations.map(&:name))
+          else
+            return false unless declarations.all? { |node| literal_rspec_group?(node, receiver: "RSpec") }
+          end
+        end
+        !registration_dependency?(retained_nodes.flatten, framework, omitted_classes)
+      end
+
+      def registration_dependency?(nodes, framework, omitted_classes)
+        until nodes.empty?
+          node = nodes.pop
+          if framework == "minitest"
+            return true if omitted_class_reference?(node, omitted_classes)
+          elsif rspec_registry_reference?(node)
+            return true
+          end
+          nodes.concat(node.compact_child_nodes)
+        end
+        false
+      end
+
+      def omitted_class_reference?(node, classes)
+        return classes.include?(node.name) if node.is_a?(Prism::ConstantReadNode) || node.is_a?(Prism::ConstantPathNode)
+        return false unless node.is_a?(Prism::CallNode) && %i[const_get const_defined? const_source_location].include?(node.name)
+
+        name = node.arguments&.arguments&.first
+        (name.is_a?(Prism::StringNode) || name.is_a?(Prism::SymbolNode)) && classes.include?(name.unescaped.delete_prefix("::").to_sym)
+      end
+
+      def rspec_registry_reference?(node)
+        if node.is_a?(Prism::ConstantPathNode)
+          return %w[RSpec::Core::World RSpec::Core::Configuration RSpec::Core::ExampleGroup].include?(node.location.slice.delete_prefix("::"))
+        end
+
+        node.is_a?(Prism::CallNode) && %w[RSpec ::RSpec].include?(node.receiver&.location&.slice) &&
+          %i[world configuration configure reset clear_examples].include?(node.name)
+      end
+
+      def statements(path)
+        result = Prism.parse_file(path)
+        raise Unusable, "cannot inspect test declarations" unless result.success?
+
+        result.value.statements&.body || []
+      end
+
+      def literal_require(node)
+        return unless node.is_a?(Prism::CallNode) && !node.receiver && !node.block && node.name == :require
+
+        args = node.arguments&.arguments
+        args.first.unescaped if args&.size == 1 && args.first.is_a?(Prism::StringNode)
+      end
+
+      def minitest_declarations?(path, declarations, tests)
+        declarations.all? do |node|
+          next false unless node.is_a?(Prism::ClassNode) && node.constant_path.is_a?(Prism::ConstantReadNode) &&
+                            %w[Minitest::Test ActiveSupport::TestCase].include?(node.superclass&.location&.slice) &&
+                            node.body.is_a?(Prism::StatementsNode)
+
+          prefix = "#{node.name}#"
+          class_tests = tests.select { |id, _| id.start_with?(prefix) }
+          class_tests.any? && class_tests.values.all? { |test| test.fetch("file") == path } &&
+            node.body.body.all? { |declaration| minitest_method?(declaration) }
+        end
+      end
+
+      def minitest_method?(node)
+        return !node.receiver if node.is_a?(Prism::DefNode)
+        return false unless node.is_a?(Prism::CallNode) && !node.receiver && node.block.is_a?(Prism::BlockNode)
+
+        (node.name == :test && literal_description?(node)) || (%i[setup teardown].include?(node.name) && !node.arguments)
+      end
+
+      def literal_rspec_group?(node, receiver: nil)
+        return false unless node.is_a?(Prism::CallNode) && node.receiver&.location&.slice == receiver &&
+                            %i[describe context].include?(node.name) && literal_description?(node) &&
+                            node.block.is_a?(Prism::BlockNode) && !node.block.parameters && node.block.body.is_a?(Prism::StatementsNode)
+
+        node.block.body.body.all? do |child|
+          literal_rspec_group?(child) ||
+            (child.is_a?(Prism::CallNode) && !child.receiver && %i[it example specify].include?(child.name) &&
+             literal_description?(child) && child.block.is_a?(Prism::BlockNode))
+        end
+      end
+
+      def literal_description?(node)
+        args = node.arguments&.arguments
+        args&.size == 1 && args.first.is_a?(Prism::StringNode)
+      end
 
       def valid_digests?(entries)
         entries.is_a?(Hash) && entries.values.all? { |digest| digest.is_a?(String) && digest.match?(/\A[0-9a-f]{64}\z/) }
@@ -111,7 +240,11 @@ module Ripr
       def validate_observations(current)
         tests, order, reach, unattributed, opaque = @artifact.values_at("tests", "test_order", "reach", "unattributed", "opaque_tests")
         methods = current.fetch("method_hashes").keys
-        unless tests.is_a?(Hash) && id_list?(order, tests.keys) && order.size == tests.size && reach.is_a?(Hash) &&
+        valid_tests = tests.is_a?(Hash) && tests.values.all? do |test|
+          test.is_a?(Hash) && test["file"].is_a?(String) && test["line"].is_a?(Integer)
+        end
+        unless valid_tests &&
+               id_list?(order, tests.keys) && order.size == tests.size && reach.is_a?(Hash) &&
                (reach.keys - methods).empty? && reach.values.all? { |ids| id_list?(ids, tests.keys) } &&
                id_list?(unattributed, methods) && id_list?(opaque, tests.keys)
           raise Unusable, "artifact has invalid reach or test IDs"
