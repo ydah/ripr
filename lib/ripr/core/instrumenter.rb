@@ -6,7 +6,7 @@ require_relative "operators"
 module Ripr
   module Core
     class Instrumenter
-      WRAP_ORDER = %i[binary literal connector condition removal return switch].freeze
+      WRAP_ORDER = %i[binary literal connector condition removal return switch pattern].freeze
 
       def self.call(source, path, sites)
         new(source, path, sites).call
@@ -89,6 +89,8 @@ module Ripr
           "::Ripr::R.ret(#{key},(#{text}))"
         when :removal
           "(::Ripr::R.on?(#{key}) ? nil : (#{text}))"
+        when :pattern
+          "#{text} if ::Ripr::R.cond(#{key},true)"
         when :connector
           left = rendered.fetch(node.left.node_id)
           right = rendered.fetch(node.right.node_id)

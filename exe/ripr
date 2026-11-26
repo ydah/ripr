@@ -1,6 +1,18 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require "rbconfig"
+
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 require "ripr/cli"
-exit Ripr::CLI.start
+
+exit Ripr::CLI.start(retry_full_suite: true) if ENV.delete("RIPR_RETRY_FULL_BASELINE")
+
+directory = Dir.pwd
+environment = ENV.to_h.merge("RIPR_RETRY_FULL_BASELINE" => "1")
+arguments = ARGV.map(&:dup)
+status = Ripr::CLI.start do |message|
+  warn "ripr: reach-map fallback: #{message}; retrying with all test files"
+  exec(environment, RbConfig.ruby, File.expand_path(__FILE__, directory), *arguments, chdir: directory, unsetenv_others: true)
+end
+exit status

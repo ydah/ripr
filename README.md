@@ -45,6 +45,11 @@ bundle exec ripr --since origin/main
 
 `--since` selects mutations on lines changed since the merge base, including staged, unstaged, and untracked source changes. Use `--scope method` to include every mutation in a touched method. The score and quality gates apply to the selected mutations.
 
+For deterministic, order-independent tests, run `bundle exec ripr reach-map` on the clean base revision, then run
+`bundle exec ripr --since origin/main --reach-map .ripr/reach-map.json` on your branch. Use a map from a trusted run with the same Ruby, environment, and test and source settings, including `--rails` when needed. Rails selection requires matching SQLite snapshots. Ripr includes tests that make opaque observations and runs the full baseline when load inputs cannot be verified. Use a full baseline for dependencies outside the recorded Ruby calls and observed file operations.
+
+Use `--reach-map-files 'test/models/*_test.rb'` only for files that register independently. Each matching file must be safe to omit without changing other tests' registration or behavior through shared hooks, helpers, or inspection of loaded files, test classes, or registries. Repeat the option to allow more paths. Ripr can skip eligible trailing files that only declare tests and repeat helper imports. It retries with all tests in a fresh process if the reduced baseline fails. Regenerate older maps to enable file skipping.
+
 Add `--include-tests-diff` to select mutations reached by tests in changed files. ripr also checks saved reach data for those files when available. A removed test file or changed test helper can select the entire target.
 
 ## Rails
@@ -123,6 +128,7 @@ Use `bundle exec ripr --help` for CLI options and `bundle exec ripr list operato
 Use `bundle exec ripr list mutants --skipped` to see excluded mutation sites and their reasons without running tests.
 
 - `--jobs auto` uses the CPU count and caps it using available memory after boot on Linux and macOS. Pass `--jobs N` to use a fixed worker count.
+- `--baseline-runs 2` repeats the baseline to detect changes in test outcomes, mutation reach, or infection. Ripr warns about unstable tests and validates the remaining tests before running mutations. Warnings list observed clock or random calls as clues. This mode bypasses the cache and verifies kills on the original code. Rails uses one worker to keep the test database and worker identity consistent.
 - `--operators full` adds string, regexp, collection, safe-navigation, compound assignment, and `case` mutations. `--full` controls the execution scope.
 - `--static` includes supported load-time mutations. ripr starts a fresh process with each mutation already active. A failure while loading the application is an execution error.
 - `--call-graph-reuse` can retain results across method-body edits if the current baseline observations and the previously executed dependencies still match. It reruns the baseline after a source change and falls back to ordinary invalidation when dependency tracking is incomplete.
@@ -130,6 +136,17 @@ Use `bundle exec ripr list mutants --skipped` to see excluded mutation sites and
 - `--typecheck sorbet` or `--typecheck rbs` checks mutations in a temporary copy using `srb tc` or `steep check`. Install the selected checker in the project bundle and make sure the original project passes its check.
 
 ## CI
+
+Prepare a shard plan once, then pass `.ripr/shard-plan.json` to each shard job.
+
+```sh
+bundle exec ripr shard-plan 2 --no-samples
+bundle exec ripr --shard 1/2 --no-samples --report-dir .ripr/shard-1
+```
+
+Run the second shard with `--shard 2/2` and its own report directory. Use the same options, clean Git checkout, absolute project path, runtime, and test inputs for every job. Share plans from trusted runs. `--no-samples` keeps sampled application operands out of CI artifacts. Rails requires matching SQLite snapshots and uses one worker per shard. Collect each report directory's `shard.json` for aggregation.
+
+When `--include-tests-diff` finds changed tests, sharding selects all candidate mutations so it includes coverage removed by the edit.
 
 For a pull request workflow on GitHub Actions, fetch history for the merge base and install your project's bundle.
 
@@ -145,7 +162,11 @@ steps:
   - run: bundle exec ripr --since origin/main --reporter text --reporter github
 ```
 
-The `github` reporter adds annotations for surviving mutations. The [composite action](action.yml) also caches `.ripr/`. After establishing a baseline, add `--fail-on-survived` or `--threshold 80` to enforce a quality gate.
+The `github` reporter adds annotations for surviving mutations. The [composite action](action.yml) also caches `.ripr/snapshot.json`. After establishing a baseline, add `--fail-on-survived` or `--threshold 80` to enforce a quality gate.
+
+For suites whose tests can run independently, use `reach-map: record` in the action on default-branch pushes or a schedule. In the `pull_request` workflow, set `reach-map: use` and `reach-map-workflow` to the recording workflow's filename. Give the PR job `actions: read` and use the same runner type, Ruby, and bundle setup in both jobs. The action uses a reach map from a successful run for the exact merge base when one is available, and runs the ordinary baseline on a miss.
+
+Both modes keep the Ruby, Bundler, locale, and workspace environment and drop other variables. Set the same space-separated `reach-map-env` list in both workflows for additional inputs such as `RAILS_ENV` or project-specific test settings. The CLI checks the full resulting environment before using the map.
 
 | Exit code | Meaning |
 | --- | --- |
