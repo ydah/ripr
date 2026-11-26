@@ -12,12 +12,14 @@ module Ripr
       attr_reader :env_hash, :baseline_env_hash, :source_hash, :test_hashes, :previous, :graph
 
       def initialize(config, sources:, test_files:, framework:, method_hashes:, test_ids:, probe_sites:, graph: nil, load_dependencies: nil,
-                     shared_baseline: false, environment_hash: nil)
+                     shared_baseline: false, environment_hash: nil, boot_digest: nil)
         @config = config
         @method_hashes = method_hashes
         @snapshot = Snapshot.new
         @repeated_baseline = (config[:baseline_runs] || 1) > 1
-        @previous = shared_baseline || config[:full] || config[:boot] || config[:rails] || @repeated_baseline ? {} : @snapshot.read
+        booted = config[:boot] || config[:rails]
+        cacheable = !booted || (boot_digest && !shared_baseline)
+        @previous = config[:full] || !cacheable || shared_baseline || @repeated_baseline ? {} : @snapshot.read
         @previous = {} if @previous.key?("shard_inputs") && !matching_shard_inputs?(@previous["shard_inputs"], environment_hash)
         @source_hash = digest(sources.sort.to_h.transform_values { |source| Digest::SHA256.hexdigest(source) })
         @test_hashes = test_files.sort.to_h { |path| [path, Digest::SHA256.file(path).hexdigest] }
@@ -34,11 +36,12 @@ module Ripr
         settings = config.to_h.slice(:operators, :arid_callees, :tests, :samples, :seed, :static)
         context = [VERSION, RUBY_ENGINE, RUBY_VERSION, RUBY_PLATFORM, Dir.pwd, Prism::VERSION, framework,
                    settings, dependencies, probe_sites.sort, ENV.fetch("RIPR_LOADER", nil), ENV.fetch("SPEC_OPTS", nil)]
+        context << boot_digest if booted && !shared_baseline
         execution = [@test_hashes, test_ids.sort, config[:timeout], config[:jobs],
                      config[:verify_not_infected], config[:verify_killed], config[:call_graph_reuse], config[:typecheck]]
         @baseline_env_hash = digest([context, @source_hash])
         @env_hash = digest([@baseline_env_hash, execution])
-        if graph&.structure_hash && (load_signature = graph.signature(load_dependencies))
+        if cacheable && graph&.structure_hash && (load_signature = graph.signature(load_dependencies))
           @graph = graph
           @graph_context = digest([context, execution, graph.structure_hash, load_signature.sort])
         end

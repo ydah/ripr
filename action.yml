@@ -14,17 +14,28 @@ inputs:
   threshold:
     description: Optional minimum mutation score.
     default: ''
+  reach-map:
+    description: Record a base reach map or use a trusted reach map. Set to record or use to opt in.
+    default: ''
+  reach-map-workflow:
+    description: Filename of the workflow that records base reach maps. Required in use mode.
+    default: ''
+  reach-map-env:
+    description: Space-separated additional environment variable names available to the reach-map workload.
+    default: ''
 runs:
   using: composite
   steps:
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: inputs.reach-map == ''
       with:
-        path: ${{ inputs.path }}/.ripr
+        path: ${{ inputs.path }}/.ripr/snapshot.json
         key: ${{ runner.os }}-ripr-${{ github.ref_name }}-${{ github.sha }}
         restore-keys: |
           ${{ runner.os }}-ripr-${{ github.ref_name }}-
           ${{ runner.os }}-ripr-
     - shell: bash
+      if: inputs.reach-map == ''
       working-directory: ${{ inputs.path }}
       env:
         RIPR_ACTION_SINCE: ${{ inputs.since }}
@@ -36,3 +47,24 @@ runs:
         if [[ "$RIPR_ACTION_FAIL" == 'true' ]]; then args+=(--fail-on-survived); fi
         if [[ -n "$RIPR_ACTION_THRESHOLD" ]]; then args+=(--threshold "$RIPR_ACTION_THRESHOLD"); fi
         bundle exec ripr "${args[@]}"
+    - id: reach-map
+      if: inputs.reach-map != ''
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      env:
+        GH_TOKEN: ${{ inputs.reach-map == 'use' && github.token || '' }}
+        RIPR_ACTION_REACH_MAP: ${{ inputs.reach-map }}
+        RIPR_ACTION_REACH_MAP_WORKFLOW: ${{ inputs.reach-map-workflow }}
+        RIPR_ACTION_REACH_MAP_ENV: ${{ inputs.reach-map-env }}
+        RIPR_ACTION_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        RIPR_ACTION_BASE_BRANCH: ${{ github.base_ref }}
+        RIPR_ACTION_SINCE: ${{ inputs.since }}
+        RIPR_ACTION_FAIL: ${{ inputs.fail-on-survived }}
+        RIPR_ACTION_THRESHOLD: ${{ inputs.threshold }}
+      run: exec bash "$GITHUB_ACTION_PATH/script/reach_map_action.sh"
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      if: inputs.reach-map == 'record' && steps.reach-map.outputs.artifact-path != ''
+      with:
+        name: ${{ steps.reach-map.outputs.artifact-name }}
+        path: ${{ steps.reach-map.outputs.artifact-path }}
+        if-no-files-found: error

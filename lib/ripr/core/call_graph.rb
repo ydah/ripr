@@ -6,7 +6,8 @@ require "prism"
 module Ripr
   module Core
     class CallGraph
-      PROCESS_CALLS = %i[exec fork spawn system ` set_trace_func].freeze
+      PROCESS_CALLS = %i[exec fork spawn system `].freeze
+      PROCESS_OWNERS = [Kernel, Kernel.singleton_class, Process.singleton_class].freeze
       REFLECTIVE_CALLS = %i[eval class_eval module_eval instance_eval define_method define_singleton_method].freeze
       SAFE_IO_CALLS = %i[== === equal? class is_a? kind_of? nil? respond_to? tty? isatty absolute_path absolute_path? basename dirname
                          expand_path extname fnmatch fnmatch? join path realpath realdirpath split exist? exists?
@@ -15,10 +16,23 @@ module Ripr
       INSTRUCTION_READS = %i[disasm disassemble to_binary to_a].freeze
       STRUCTURAL_NODES = %i[def_node class_node module_node singleton_class_node pre_execution_node post_execution_node].freeze
       DEFERRED_NODES = %i[block_node lambda_node].freeze
+      RAILS_GENERATORS = {
+        "activerecord" => { class_eval: %w[
+          association_relation associations/collection_proxy attribute_methods attribute_methods/primary_key core inheritance
+          locking/optimistic model_schema persistence reflection relation/query_methods
+        ].map { |path| "active_record/#{path}.rb" } },
+        "activemodel" => { class_eval: %w[active_model/attribute_methods.rb active_model/naming.rb] },
+        "activesupport" => {
+          class_eval: %w[active_support/concern.rb active_support/core_ext/class/attribute.rb],
+          module_eval: %w[active_support/callbacks.rb active_support/code_generator.rb active_support/delegation.rb],
+          define_method: %w[active_support/class_attribute.rb active_support/code_generator.rb active_support/multibyte/chars.rb]
+        }
+      }.freeze
 
       attr_reader :structure_hash
 
-      def initialize(sources)
+      def initialize(sources, settings = {})
+        @rails = settings[:rails]
         @files = {}
         @hashes = {}
         @lines = {}
@@ -57,12 +71,13 @@ module Ripr
         erb = ERB.instance_method(:result).source_location&.first if defined?(ERB)
         frameworks = %w[minitest rspec-core rspec-mocks rspec-support rspec-expectations].filter_map { |name| gem_prefix(name) }
         frameworks << "#{File.dirname(rspec_options, 4)}/" if rspec_options
+        rails_calls = @rails ? rails_trace_calls : {}
         dependencies = {}
         uncertain = false
         tracer = TracePoint.new(:call, :c_call, :b_call) do |event|
           next if uncertain
 
-          if opaque_call?(event, rspec_options, erb, frameworks)
+          if opaque_call?(event, rspec_options, erb, frameworks) && !rails_calls[[event.path, event.defined_class, event.method_id]]
             uncertain = true
           elsif event.event != :c_call && (path = @files[event.path])
             @lines[path].fetch(event.lineno, []).each { |key| dependencies[key] = true }
@@ -137,11 +152,27 @@ module Ripr
         "#{specification.full_gem_path}/" if specification
       end
 
+      def rails_trace_calls
+        calls = {}
+        RAILS_GENERATORS.each do |gem, methods|
+          next unless (root = gem_prefix(gem))
+
+          methods.each do |name, paths|
+            paths.each { |path| calls[["#{root}lib/#{path}", Module, name]] = true }
+          end
+        end
+        if (root = gem_prefix("logger"))
+          path = "#{root}lib/logger/log_device.rb"
+          calls[[path, IO, :stat]] = calls[[path, IO, :write]] = calls[[path, File::Stat, :size]] = true
+        end
+        calls
+      end
+
       def opaque_call?(event, rspec_options, erb, frameworks)
         name = event.method_id
-        return true if PROCESS_CALLS.include?(name)
-
         owner = event.defined_class
+        return true if %i[set_trace_func add_trace_func].include?(name)
+        return true if PROCESS_CALLS.include?(name) && PROCESS_OWNERS.include?(owner)
         return true if owner == TracePoint && %i[enable disable].include?(name)
 
         if REFLECTIVE_CALLS.include?(name) && REFLECTIVE_OWNERS.include?(owner)
