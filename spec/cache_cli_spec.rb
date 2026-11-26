@@ -440,7 +440,8 @@ RSpec.describe "incremental ripr commands" do
           def test_failure; flunk "broken baseline"; end
         end
       RUBY
-      command(directory, expected: 4)
+      _, error = command(directory, expected: 4)
+      expect(error).to include("broken baseline")
       expect(File.read(cache_path)).to eq(previous)
     end
   end
