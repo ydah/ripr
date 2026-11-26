@@ -40,6 +40,67 @@ RSpec.describe "Core source analysis" do
     end
   end
 
+  it "plans opt-in range, collection, predicate, and fetch mutations" do
+    source = <<~RUBY
+      def value(items, attributes, key, limit)
+        (1..limit)
+        (1...limit)
+        (..limit)
+        items.select(&:odd?)
+        items.reject { |item| item.odd? }
+        items.min
+        items.max
+        items.any?(&:odd?)
+        items.all?(&:odd?)
+        limit.positive?
+        limit.negative?
+        limit.zero?
+        items.present?
+        items.blank?
+        attributes . fetch(key)
+      end
+    RUBY
+    operators = %w[range_endpoint collection_query predicate_method fetch_index]
+    mutants = analyze(source, operators: operators).fetch(:mutants)
+    expect(mutants.map { |mutant| mutant.values_at(:operator, :mutated) }).to contain_exactly(
+      ["range_endpoint", "1...limit"], ["range_endpoint", "1..limit"], ["range_endpoint", "...limit"],
+      ["collection_query", "items.reject(&:odd?)"], ["collection_query", "items.select { |item| item.odd? }"],
+      ["collection_query", "items.max"], ["collection_query", "items.min"],
+      ["collection_query", "items.all?(&:odd?)"], ["collection_query", "items.any?(&:odd?)"],
+      ["predicate_method", "limit.negative?"], ["predicate_method", "limit.positive?"], ["predicate_method", "!(limit.zero?)"],
+      ["predicate_method", "items.blank?"], ["predicate_method", "items.present?"], ["fetch_index", "attributes[key]"]
+    )
+    expect(mutants.map { |mutant| mutant.fetch(:mode) }.uniq).to eq(["unknown"])
+    expect(analyze(source).fetch(:mutants).map { |mutant| mutant.fetch(:operator) } & operators).to be_empty
+  end
+
+  it "leaves flip-flops, patterns and nonmatching Ruby call shapes out of the opt-in operators" do
+    source = <<~RUBY
+      def value(items, attributes, key, limit, *arguments, **keywords, &block)
+        :inside if limit == 1..limit == 5
+        items in [1..5]
+        attributes.fetch(key: key)
+        attributes.fetch(**keywords)
+        attributes.fetch(*arguments)
+        attributes.fetch(key, :default)
+        attributes.fetch(key, &block)
+        attributes.fetch(key) { :default }
+        attributes.fetch key
+        attributes&.fetch(key)
+        fetch(key)
+        items.select(:column)
+        items.min(2)
+        items.any?(Integer)
+        items&.blank?
+        positive?(limit)
+        items.zero? { :callback }
+        items.present?(limit)
+      end
+    RUBY
+    operators = %w[range_endpoint collection_query predicate_method fetch_index]
+    expect(analyze(source, operators: operators).fetch(:mutants)).to be_empty
+  end
+
   it "uses one arithmetic definition for matching, mutation and native array-copy probing" do
     operator = Ripr::Core::Operators.fetch("arithmetic")
     node = Prism.parse("left + right").value.statements.body.first
@@ -148,7 +209,7 @@ RSpec.describe "Core source analysis" do
         count += 2
         case count
         when 3 then ["ready", /pattern/, {key: items&.first}, items.first]
-        else []
+        else [1..count, count.positive?, items.min, items.fetch(0)]
         end
       end
     RUBY
