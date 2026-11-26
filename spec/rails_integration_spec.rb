@@ -243,6 +243,39 @@ if ENV["RIPR_TEST_RAILS"]
       expect(counts).to eq([2, 1, 1])
     end
 
+    it "reuses a sharded baseline with a matching Rails SQLite snapshot" do
+      counts, reports, original_database = run_fixture(<<~RUBY)
+        require "json"
+        require "open3"
+        require "rbconfig"
+
+        File.write(".gitignore", "/tmp/\n/log/\n/.ripr/\n")
+        system("git", "init", "-q", exception: true)
+        system("git", "-c", "maintenance.auto=false", "add", ".", exception: true)
+        system("git", "-c", "maintenance.auto=false", "-c", "user.name=Ripr Test", "-c", "user.email=test@example.test",
+               "commit", "-qm", "fixture", exception: true)
+
+        command = ->(args) do
+          output, error, status = Open3.capture3(RbConfig.ruby, #{File.expand_path('../exe/ripr', __dir__).dump},
+                                                *args, "--rails", "--operators", "comparison", "--jobs", "2")
+          raise error unless status.success?
+
+          output
+        end
+        command.call(%w[shard-plan 2])
+        plan = JSON.parse(File.read(".ripr/shard-plan.json"))
+        reports = (1..2).map do |index|
+          JSON.parse(command.call(["--shard", "\#{index}/2", "--reporter", "agent"]))
+        end
+        puts JSON.generate([plan.dig("report", "run", "metrics", "baseline_tests_run"), reports, File.exist?("test.sqlite3")])
+      RUBY
+
+      expect(counts).to eq(1)
+      expect(reports.map { |report| report.dig("run", "metrics", "baseline_tests_run") }).to eq([0, 0])
+      expect(reports.sum { |report| report.dig("summary", "killed") }).to eq(1)
+      expect(original_database).to be(false)
+    end
+
     if (postgresql_url = ENV.fetch("RIPR_TEST_POSTGRESQL", nil))
       it "clones disconnected PostgreSQL snapshots and falls back to the same captured data" do
         results = run_fixture(<<~'RUBY', url: postgresql_url)
@@ -318,6 +351,176 @@ if ENV["RIPR_TEST_RAILS"]
 
         expect(results).to eq([[[%w[booted original], true, %w[booted original], ["original"]],
                                 [%w[booted original], false, %w[booted original], ["original"]]], ["original"], []])
+      end
+
+      it "reuses a sealed PostgreSQL template only for equivalent booted database content" do
+        restore_help, = Open3.capture2("pg_restore", "--help")
+        skip "pg_restore has no stable restrict key option" unless restore_help.include?("--restrict-key")
+
+        copies, original, materialized, unlogged, concurrent, ambiguous, collision = run_fixture(<<~'RUBY', url: postgresql_url)
+          require "digest"
+          require "json"
+          require "pg"
+          require "ripr/integration/rails_database"
+          require "tmpdir"
+
+          ENV["RIPR_POSTGRESQL_TEMPLATE_CACHE"] = "1"
+          source = "ripr_snapshot_#{SecureRandom.hex(8)}_test"
+          admin = PG.connect(ENV.fetch("RIPR_TEST_DATABASE_URL"))
+          connection = admin.conninfo_hash.reject { |_, value| value.nil? || value.empty? }
+          connect = ->(name, &block) { PG.connect(connection.merge(dbname: name), &block) }
+          config = { database: source, host: connection[:host], port: connection[:port], username: connection[:user],
+                     password: connection[:password], sslmode: connection[:sslmode] }
+          role = admin.exec("SELECT current_user").getvalue(0, 0)
+          scope = Digest::SHA256.hexdigest([Dir.pwd, source, 0, role].join("\0")).slice(0, 32)
+          slot = "ripr_test_cache_#{scope}"
+          template = lambda do
+            admin.exec_params(<<~SQL, [slot]).first
+              SELECT oid, datallowconn, shobj_description(oid, 'pg_database') AS marker
+                FROM pg_database
+               WHERE datname = $1
+            SQL
+          end
+          raise "test cache slot already exists" if template.call
+          own_slot = true
+          rows = ->(session) { session.exec("SELECT label FROM widgets ORDER BY id").column_values(0) }
+          analyzed = ->(session) { session.exec("SELECT 1 FROM pg_stats WHERE tablename = 'widgets'").ntuples.positive? }
+          implementation = Ripr::Integration::RailsDatabase::PostgreSQL
+
+          begin
+            admin.exec("CREATE DATABASE #{admin.quote_ident(source)}")
+            own_source = true
+            connect.call(source) do |session|
+              session.exec("CREATE TABLE widgets (id bigserial PRIMARY KEY, label text NOT NULL)")
+              session.exec("INSERT INTO widgets (label) VALUES ('original')")
+            end
+
+            capture = lambda do |label, advance: false, schema: false, view: nil, unlogged: false, idle_timeout: nil, &observe|
+              Dir.mktmpdir do |directory|
+                database = implementation.new(config, Dir.pwd, directory, 0)
+                connect.call(database.parent) do |session|
+                  session.exec_params("INSERT INTO widgets (id, label) VALUES (2, $1)", [label])
+                  session.exec("SELECT setval('widgets_id_seq', 10)") if advance
+                  session.exec("ALTER TABLE widgets ADD COLUMN stock integer") if schema
+                  session.exec("ALTER TABLE widgets SET UNLOGGED") if unlogged
+                  if view
+                    session.exec_params("SELECT set_config('ripr.fixture_value', $1, false)", [view])
+                    session.exec("CREATE MATERIALIZED VIEW capture_value AS SELECT current_setting('ripr.fixture_value', true) AS value")
+                  end
+                  session.exec("ANALYZE widgets")
+                end
+                previous_options = ENV["PGOPTIONS"]
+                begin
+                  ENV["PGOPTIONS"] = "#{previous_options} -c idle_session_timeout=#{idle_timeout}" if idle_timeout
+                  database.capture
+                ensure
+                  ENV["PGOPTIONS"] = previous_options
+                end
+                observe.call(database)
+              ensure
+                database&.close
+              end
+            end
+
+            samples = 5.times.map do |run|
+              capture.call(run >= 2 ? "changed" : "booted", advance: run >= 3, schema: run >= 4) do |database|
+                ready = connect.call(database.worker(0, fresh_boot: false)) do |worker|
+                  state = [rows.call(worker), worker.exec("SELECT last_value FROM widgets_id_seq").getvalue(0, 0),
+                           worker.exec("SELECT * FROM widgets LIMIT 0").fields, analyzed.call(worker)]
+                  worker.exec("INSERT INTO widgets (id, label) VALUES (99, 'written by worker')")
+                  state
+                end
+                local = database.parent.delete_suffix("parent") + "template"
+                local_template = admin.exec_params("SELECT 1 FROM pg_database WHERE datname = $1", [local]).ntuples.positive?
+                [template.call, ready, connect.call(database.worker(0, fresh_boot: true), &rows), local_template]
+              end
+            end
+
+            previous = template.call
+            materialized = %w[first second].map do |view|
+              capture.call("changed", advance: true, schema: true, view: view) do |database|
+                actual = connect.call(database.worker(0, fresh_boot: false)) do |worker|
+                  worker.exec("SELECT value FROM capture_value").getvalue(0, 0)
+                end
+                [actual, template.call == previous]
+              end
+            end
+            unlogged = capture.call("unlogged", unlogged: true) do |database|
+              [connect.call(database.worker(0, fresh_boot: false), &rows), template.call == previous]
+            end
+
+            idle_timeout = 200 if admin.server_version >= 140_000
+            scenarios = idle_timeout ? %i[idle terminated] : [:idle]
+            concurrent = scenarios.to_h do |scenario|
+              result = capture.call("older run", idle_timeout: idle_timeout) do |older|
+                previous = template.call
+                if scenario == :terminated
+                  lease = older.instance_variable_get(:@cache_lease)
+                  terminated = admin.exec_params("SELECT pg_terminate_backend($1, 5000)", [lease.backend_pid]).getvalue(0, 0)
+                  raise "could not terminate test lease" unless terminated == "t"
+                elsif idle_timeout
+                  sleep 0.45
+                end
+                capture.call("newer run") do |newer|
+                  workers = [older, newer].map do |database|
+                    connect.call(database.worker(0, fresh_boot: false)) { |worker| [rows.call(worker), analyzed.call(worker)] }
+                  end
+                  [template.call == previous, workers]
+                end
+              end
+              [scenario, result]
+            end
+
+            missed_acknowledgement = true
+            Ripr::Integration::RailsDatabase::PostgreSQLTemplateCache.prepend(Module.new do
+              define_method(:downgrade_lock) do
+                if missed_acknowledgement
+                  missed_acknowledgement = false
+                  raise PG::Error, "simulated lost publication acknowledgement"
+                end
+                super()
+              end
+            end)
+            previous = template.call
+            ambiguous = capture.call("published during connection loss") do |database|
+              state = connect.call(database.worker(0, fresh_boot: false)) { |worker| [rows.call(worker), analyzed.call(worker)] }
+              [!missed_acknowledgement && template.call != previous, state]
+            end
+
+            unrelated = "managed separately"
+            admin.exec("COMMENT ON DATABASE #{admin.quote_ident(slot)} IS #{admin.escape_literal(unrelated)}")
+            previous = template.call
+            collision = capture.call("separate database") do |database|
+              [connect.call(database.worker(0, fresh_boot: false), &rows), template.call == previous]
+            end
+
+            puts JSON.generate([samples, connect.call(source, &rows), materialized, unlogged, concurrent, ambiguous, collision])
+          ensure
+            admin.exec("DROP DATABASE IF EXISTS #{admin.quote_ident(slot)}") if own_slot
+            admin.exec("DROP DATABASE IF EXISTS #{admin.quote_ident(source)}") if own_source
+            admin.close
+          end
+        RUBY
+
+        templates = copies.map(&:first)
+        expect(templates).to all(include("datallowconn" => "f"))
+        expect(templates[0]).to eq(templates[1])
+        expect(templates.map { |template| template.fetch("oid") }.uniq.size).to eq(4)
+        expect(copies.map { |_, ready, _, _| ready }).to eq(
+          [[%w[original booted], "1", %w[id label], true], [%w[original booted], "1", %w[id label], true],
+           [%w[original changed], "1", %w[id label], true], [%w[original changed], "10", %w[id label], true],
+           [%w[original changed], "10", %w[id label stock], true]]
+        )
+        expect(copies.map { |_, _, pristine, _| pristine }).to eq([["original"]] * 5)
+        expect(copies[1].last).to be(false)
+        expect(original).to eq(["original"])
+        expect(materialized).to eq([["first", true], ["second", true]])
+        expect(unlogged).to eq([%w[original unlogged], true])
+        workers = [[["original", "older run"], true], [["original", "newer run"], true]]
+        expect(concurrent.fetch("idle")).to eq([true, workers])
+        expect(concurrent.fetch("terminated")).to eq([false, workers]) if concurrent.key?("terminated")
+        expect(ambiguous).to eq([true, [["original", "published during connection loss"], true]])
+        expect(collision).to eq([["original", "separate database"], true])
       end
     end
 
