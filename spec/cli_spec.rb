@@ -230,7 +230,7 @@ RSpec.describe "ripr command" do
     expect(stdout.lines.map(&:chomp)).to include("string_literal", "regexp_literal", "collection_literal", "safe_navigation")
   end
 
-  it "kills opt-in Ruby range, collection, predicate, and fetch mutations" do
+  it "kills opt-in Ruby expression and pattern mutations" do
     Dir.mktmpdir("ripr-ruby-operators") do |directory|
       FileUtils.mkdir_p(%w[lib test].map { |path| File.join(directory, path) })
       File.write(File.join(directory, "lib/sample.rb"), <<~RUBY)
@@ -239,6 +239,15 @@ RSpec.describe "ripr command" do
           def self.largest(values); values.max; end
           def self.empty?(count); count.zero?; end
           def self.required(values); values.fetch(:required); end
+          def self.pick(value); value ||= :fallback; end
+          def self.no_odds?(values); values.none?(&:odd?); end
+
+          def self.first_number(input)
+            case input
+            in [Integer => number] then number
+            else :unknown
+            end
+          end
         end
       RUBY
       File.write(File.join(directory, "test/sample_test.rb"), <<~RUBY)
@@ -250,11 +259,14 @@ RSpec.describe "ripr command" do
             assert_equal 5, Sample.largest([2, 5])
             assert Sample.empty?(0)
             assert_raises(KeyError) { Sample.required({}) }
+            assert_equal :chosen, Sample.pick(:chosen)
+            assert Sample.no_odds?([2])
+            assert_equal 3, Sample.first_number([3])
           end
         end
       RUBY
 
-      operators = %w[range_endpoint collection_query predicate_method fetch_index]
+      operators = %w[range_endpoint collection_query predicate_method fetch_index logical_assignment collection_none case_in]
       stdout, stderr, status = command("--full", "--jobs", "1", "--operators", operators.join(","),
                                        "--reporter", "agent", directory: directory)
       expect(status.success?).to be(true), stderr

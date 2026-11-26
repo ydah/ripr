@@ -101,6 +101,43 @@ RSpec.describe "Core source analysis" do
     expect(analyze(source, operators: operators).fetch(:mutants)).to be_empty
   end
 
+  it "plans logical assignment, none?, and unguarded case pattern mutations" do
+    source = <<~RUBY
+      def value(value, store, key, items)
+        value ||= key
+        store[key] &&= value
+        items.any?(&:odd?)
+        items.none?(&:odd?)
+        case value
+        in [Integer => number]
+          number
+        in Integer if key
+          key
+        in label:
+          label
+        in 2..3, then :pair
+        in 4.. then :endless
+        in { name: }
+          name
+        end
+      end
+    RUBY
+    operators = %w[logical_assignment collection_none case_in]
+    mutants = analyze(source, operators: operators).fetch(:mutants)
+    expect(mutants.map { |mutant| mutant.values_at(:operator, :original, :mutated) }).to contain_exactly(
+      ["logical_assignment", "value ||= key", "value = key"],
+      ["logical_assignment", "store[key] &&= value", "store[key] = value"],
+      ["collection_none", "items.any?(&:odd?)", "items.none?(&:odd?)"],
+      ["collection_none", "items.none?(&:odd?)", "items.any?(&:odd?)"],
+      ["case_in", "[Integer => number]", "[Integer => number] if false"],
+      ["case_in", "{ name: }", "{ name: } if false"]
+    )
+    expect(analyze(source).fetch(:mutants).map { |mutant| mutant.fetch(:operator) } & operators).to be_empty
+    existing = analyze(source, operators: ["collection_query"]).fetch(:mutants)
+    combined = analyze(source, operators: %w[collection_query collection_none]).fetch(:mutants)
+    expect(combined.select { |mutant| mutant.fetch(:operator) == "collection_query" }).to eq(existing)
+  end
+
   it "uses one arithmetic definition for matching, mutation and native array-copy probing" do
     operator = Ripr::Core::Operators.fetch("arithmetic")
     node = Prism.parse("left + right").value.statements.body.first
@@ -205,7 +242,12 @@ RSpec.describe "Core source analysis" do
       LIMIT = 3
       WORD = "ready"
       if true; LABEL = "on"; end
+      DEFAULT ||= "pending"
+      case :default
+      in :default then MARKER = "marker"
+      end
       def value(items, count)
+        items.none?
         count += 2
         case count
         when 3 then ["ready", /pattern/, {key: items&.first}, items.first]
