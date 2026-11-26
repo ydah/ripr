@@ -40,6 +40,100 @@ RSpec.describe "source instrumentation" do
     expect(scope.adult?(18)).to be(false)
   end
 
+  it "switches opt-in Ruby operators without calling replacements during the baseline" do
+    source = <<~RUBY
+      def self.feature(store, events)
+        range = 1..2
+        odds = [1, 2].select { |value| events << value; value.odd? }
+        [range.include?(2), odds, 0.zero?, store.fetch(:key)]
+      end
+    RUBY
+    operators = %w[range_endpoint collection_query predicate_method fetch_index]
+    scope, analysis, result = evaluate(source, operators: operators)
+    store = Object.new
+    def store.fetch(key) = [:fetch, key]
+    def store.[](key) = [:index, key]
+
+    probe = Ripr::Probe.new(result.fetch(:site_table))
+    Ripr::R.probe = probe
+    Ripr::R.current_test = "feature"
+    events = []
+    expect(scope.feature(store, events)).to eq([true, [1], true, %i[fetch key]])
+    expect(events).to eq([1, 2])
+    expect(probe.snapshot.fetch("reach").size).to eq(4)
+
+    Ripr::R.probe = nil
+    expected = {
+      "range_endpoint" => [false, [1], true, %i[fetch key]],
+      "collection_query" => [true, [2], true, %i[fetch key]],
+      "predicate_method" => [true, [1], false, %i[fetch key]],
+      "fetch_index" => [true, [1], true, %i[index key]]
+    }
+    analysis.fetch(:sites).each do |site|
+      Ripr::R.activate(site.fetch(:key), 1)
+      expect(scope.feature(store, [])).to eq(expected.fetch(site.fetch(:operator)))
+    end
+  end
+
+  it "evaluates the receiver and index once and preserves logical assignment short-circuiting" do
+    source = <<~RUBY
+      def self.pick(store, events)
+        (events << :receiver; store)[(events << :index; :key)] ||= (events << :rhs; :fresh)
+      end
+    RUBY
+    scope, analysis, = evaluate(source, operators: ["logical_assignment"])
+    events = []
+    store = Object.new
+    store.define_singleton_method(:[]) do |key|
+      events << [:read, key]
+      :original
+    end
+    store.define_singleton_method(:[]=) { |key, value| events << [:write, key, value] }
+    expect(scope.pick(store, events)).to eq(:original)
+    expect(events).to eq([:receiver, :index, %i[read key]])
+
+    events.clear
+    Ripr::R.activate(analysis.fetch(:sites).first.fetch(:key), 1)
+    expect(scope.pick(store, events)).to eq(:fresh)
+    expect(events).to eq([:receiver, :index, :rhs, %i[write key fresh]])
+  end
+
+  it "disables a matched case pattern without undoing its bindings or repeating its dispatch" do
+    source = <<~RUBY
+      def self.pick(item)
+        case item
+        in [Integer => n]
+          [:matched, n]
+        else
+          [:other, n]
+        end
+      end
+    RUBY
+    scope, analysis, result = evaluate(source, operators: ["case_in"])
+    events = []
+    item = Object.new
+    item.define_singleton_method(:deconstruct) do
+      events << :deconstruct
+      [2]
+    end
+    probe = Ripr::Probe.new(result.fetch(:site_table))
+    Ripr::R.probe = probe
+    Ripr::R.current_test = "unmatched"
+    expect(scope.pick(:unmatched)).to eq([:other, nil])
+    expect(probe.snapshot.fetch("reach")).to be_empty
+    Ripr::R.current_test = "matched"
+    expect(scope.pick(item)).to eq([:matched, 2])
+    expect(events).to eq([:deconstruct])
+
+    site = analysis.fetch(:sites).first.fetch(:key)
+    expect(probe.snapshot.fetch("reach").fetch(site)).to eq(["matched"])
+    expect(probe.snapshot.fetch("infect").fetch(analysis.fetch(:mutants).first.fetch(:id))).to eq(["matched"])
+    Ripr::R.probe = nil
+    Ripr::R.activate(site, 1)
+    expect(scope.pick(item)).to eq([:other, 2])
+    expect(events).to eq(%i[deconstruct deconstruct])
+  end
+
   it "does not infect the empty Array operand of native addition and subtraction" do
     source = "def self.copy(values, extra); values + extra; end"
     scope, analysis, result = evaluate(source, operators: ["arithmetic"])

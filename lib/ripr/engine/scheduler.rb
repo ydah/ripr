@@ -27,9 +27,16 @@ module Ripr
                                        on_result: @profile&.method(:record_mutation)) do |mutant, slot|
           execute(mutant, slot, adapter)
         end
-        originals = @config[:verify_killed] ? verify_kills(completed, adapter, timeout) : {}
+        verify = @config[:verify_killed] || @config[:baseline_runs] > 1
+        originals = verify ? verify_kills(completed, adapter, timeout) : {}
         diagnoses = diagnose(completed, adapter)
         results.concat(record_results(completed, originals, diagnoses)).sort_by { |mutant| mutant.fetch("full_id") }
+      end
+
+      def shard_costs(selected)
+        _, ready = classify(selected)
+        costs = ready.to_h { |mutant| [mutant.fetch("full_id"), estimated_cost(mutant)] }
+        selected.to_h { |mutant| [mutant.full_id, costs.fetch(mutant.full_id, 0)] }
       end
 
       private

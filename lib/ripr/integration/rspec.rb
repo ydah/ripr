@@ -7,9 +7,10 @@ require_relative "../runtime"
 module Ripr
   module Integration
     class RSpec
-      def initialize(test_files, seed: 0)
+      def initialize(test_files, seed: 0, seed_random: false)
         @test_files = test_files.map { |path| File.expand_path(path) }
         @seed = seed
+        @seed_random = seed_random
         @executed = {}
       end
 
@@ -40,7 +41,7 @@ module Ripr
         end
       end
 
-      def run(ids = nil, fail_fast: false)
+      def run(ids = nil, fail_fast: false, record_outcomes: false)
         return { "success" => false, "tests" => {}, "failures" => [{ "message" => @output.string }] } if @load_failed
 
         ids ||= @examples.map(&:id)
@@ -63,14 +64,26 @@ module Ripr
           end
         end
         ::RSpec.configuration.ordering_registry.register(:global, ::RSpec::Core::Ordering::Custom.new(ordering))
+        @outcomes = record_outcomes ? {} : nil
+        ::RSpec.configuration.reporter.register_listener(self, :example_finished) if record_outcomes
+        srand(@seed) if @seed_random
         status = @runner.run_specs(::RSpec.world.ordered_example_groups)
         failures = @examples.filter_map do |example|
-          next unless @executed.key?(example.id) && example.execution_result.status == :failed
+          next unless (@outcomes || @executed).key?(example.id) && example.execution_result.status == :failed
 
           { "id" => example.id, "message" => example.execution_result.exception.message }
         end
-        failures << { "message" => @output.string } if !status.zero? && failures.empty?
-        { "success" => status.zero?, "tests" => @executed, "failures" => failures }
+        if !status.zero? && (failures.empty? || (record_outcomes && ::RSpec.world.non_example_failure))
+          failures << { "message" => @output.string }
+        end
+        result = { "success" => status.zero?, "tests" => @executed, "failures" => failures }
+        result["outcomes"] = @outcomes if record_outcomes
+        result
+      end
+
+      def example_finished(notification)
+        example = notification.example
+        @outcomes[example.id] = example.execution_result.status.to_s if @outcomes
       end
 
       def record(example)
