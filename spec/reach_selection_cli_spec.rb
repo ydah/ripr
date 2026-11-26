@@ -356,6 +356,43 @@ RSpec.describe "ripr reach-map selection" do
     end
   end
 
+  it "falls back to a full baseline when a cached reach map fails validation" do
+    secondary = "module Secondary\n  def self.calculate = 1 + 1\nend\n"
+    with_project("test/sample_test.rb" => minitest, "lib/secondary.rb" => secondary) do |directory|
+      base = capture(directory)
+      artifact = File.join(directory, ".ripr/reach-map.json")
+      map = JSON.parse(File.read(artifact))
+      write(directory, "lib/sample.rb", source.sub("3 + 2", "4 + 2"))
+      write(directory, "lib/secondary.rb", secondary.sub("1 + 1", "2 + 1"))
+      expect(baseline_count(select_report(directory, base))).to eq(1)
+      full = report(directory, base)
+      expect(baseline_count(full)).to eq(2)
+
+      calculation = "SampleTest#test_calculate"
+      positive = "SampleTest#test_positive"
+      reach = map.fetch("reach")
+      tests = map.fetch("tests")
+      changes = {
+        "unsupported format" => { "version" => map.fetch("version") + 1 },
+        "opaque load" => { "opaque_load" => true },
+        "unknown database inputs" => { "database_inputs" => nil },
+        "stale test location" => { "tests" => tests.merge(calculation => tests.fetch(calculation).merge("line" => 3)) },
+        "incomplete test order" => { "test_order" => [calculation] },
+        "obsolete test ID" => { "reach" => reach.merge(reach.key([positive]) => ["SampleTest#test_removed"]) },
+        "truncated method digest" => { "method_hashes" => map.fetch("method_hashes").merge(reach.key([calculation]) => "truncated") },
+        "stale source digest" => { "sources" => map.fetch("sources").merge("lib/sample.rb" => "0" * 64) }
+      }
+      changes.each do |label, overrides|
+        aggregate_failures(label) do
+          File.write(artifact, JSON.generate(map.merge(overrides)))
+          result = select_report(directory, base)
+          expect(baseline_count(result)).to eq(2), "Expected a full baseline for #{label}, got #{baseline_count(result)} tests"
+          expect(result.values_at("summary", "gaps")).to eq(full.values_at("summary", "gaps"))
+        end
+      end
+    end
+  end
+
   it "runs the full baseline after edits outside the recorded project" do
     files = { "app/lib/sample.rb" => source, "app/test/sample_test.rb" => minitest, "lib/sibling.rb" => "# original\n" }
     with_project(files) do |directory|
