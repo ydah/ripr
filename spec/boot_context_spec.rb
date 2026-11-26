@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "prism"
 require "tempfile"
 require "tmpdir"
 require "ripr/engine/boot_context"
@@ -79,6 +80,52 @@ RSpec.describe Ripr::Engine::BootContext do
     end
   end
 
+  it "tracks file sizes and directory entries consumed outside the project input globs" do
+    write("setup.rb", "Dir.children('state')\nFile.size('state/settings')\n")
+    write("state/settings", "first\n")
+    initial = fingerprint
+    expect(initial).to match(/\A[a-f0-9]{64}\z/)
+
+    write("state/settings", "longer contents\n")
+    changed_size = fingerprint
+    expect(changed_size).to match(/\A[a-f0-9]{64}\z/)
+    expect(changed_size).not_to eq(initial)
+    write("state/extra", "new entry\n")
+    changed_entries = fingerprint
+    expect(changed_entries).to match(/\A[a-f0-9]{64}\z/)
+    expect(changed_entries).not_to eq(changed_size)
+  end
+
+  it "declines reuse when a loaded script changes or disappears after boot" do
+    write("setup.rb", "load File.join(__dir__, 'helper.rb')\n")
+    write("helper.rb", "true\n")
+    context = described_class.new(boot: "setup.rb", rails: false)
+    context.observe { load File.expand_path("setup.rb") }
+    expect(context.fingerprint).to match(/\A[a-f0-9]{64}\z/)
+
+    write("helper.rb", "false\n")
+    expect(context.fingerprint).to be_nil
+
+    write("helper.rb", "true\n")
+    expect(context.fingerprint).to match(/\A[a-f0-9]{64}\z/)
+    File.delete("helper.rb")
+    expect(context.fingerprint).to be_nil
+  end
+
+  it "declines reuse when boot consumes a non-file IO stream" do
+    write("setup.rb", "true\n")
+    context = described_class.new(boot: "setup.rb", rails: false)
+    IO.pipe do |reader, writer|
+      writer.write("1")
+      read = context.observe do
+        load File.expand_path("setup.rb")
+        reader.read(1)
+      end
+      expect(read).to eq("1")
+    end
+    expect(context.fingerprint).to be_nil
+  end
+
   it "leaves scripts outside a loaded gem's Ruby require paths opaque" do
     Dir.mktmpdir do |dependency|
       dependency = File.realpath(dependency)
@@ -114,8 +161,10 @@ RSpec.describe Ripr::Engine::BootContext do
   end
 
   it "refuses boot code that introspects method bodies or starts a tracer" do
+    write("helper.rb", "true\n")
     operations = ["RubyVM::InstructionSequence.of(method(:puts))", "TracePoint.new(:call) {}.enable {}",
-                  "Thread.current.set_trace_func(nil)"]
+                  "Thread.current.set_trace_func(nil)", "RubyVM::AbstractSyntaxTree.parse_file('helper.rb')",
+                  "Prism.parse_file('helper.rb')", "RubyVM::InstructionSequence.compile('true').disasm"]
     operations.each do |code|
       write("setup.rb", "#{code}\n")
       expect(fingerprint).to be_nil

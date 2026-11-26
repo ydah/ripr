@@ -36,8 +36,8 @@ RSpec.describe "incremental ripr commands" do
     output
   end
 
-  def command(directory, *arguments, expected: 0)
-    output, error, status = Open3.capture3(RbConfig.ruby, executable, "--reporter", "agent", "--operators", "comparison", *arguments,
+  def command(directory, *arguments, env: {}, expected: 0)
+    output, error, status = Open3.capture3(env, RbConfig.ruby, executable, "--reporter", "agent", "--operators", "comparison", *arguments,
                                            chdir: directory)
     expect(status.exitstatus).to eq(expected), error
     [output.empty? ? nil : JSON.parse(output), error]
@@ -73,6 +73,46 @@ RSpec.describe "incremental ripr commands" do
         command(directory, *options)
         expect(snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 2, "reused" => 0)
       end
+    end
+  end
+
+  it "reuses results with a warm Bootsnap cache until an application boot input changes" do
+    with_project do |directory|
+      cache = File.join(directory, "cache")
+      index = File.join(cache, "bootsnap/load-path-cache")
+      env = { "RIPR_LOADER" => nil, "BOOTSNAP_CACHE_DIR" => cache, "DISABLE_BOOTSNAP" => nil, "BOOTSNAP_READONLY" => nil,
+              "DISABLE_BOOTSNAP_LOAD_PATH_CACHE" => nil, "DISABLE_BOOTSNAP_COMPILE_CACHE" => nil }
+      threshold = File.join(directory, "threshold.txt")
+      File.write(threshold, "18\n")
+      File.write(File.join(directory, "boot_helper.rb"), "THRESHOLD = Integer(File.read(#{threshold.dump}))\n")
+      File.write(File.join(directory, "setup.rb"), <<~RUBY)
+        require "bootsnap/setup"
+        require_relative "boot_helper"
+      RUBY
+      source = File.join(directory, "lib/sample.rb")
+      File.write(source, File.read(source).sub("age >= 18", "age >= THRESHOLD"))
+      test = File.join(directory, "test/sample_test.rb")
+      File.write(test, File.read(test).sub("adult?(20)", "adult?(18)"))
+      options = %w[--boot setup.rb --jobs 1]
+
+      command(directory, *options, env: env)
+      expect(snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 2, "reused" => 0)
+      expect(File.file?(index)).to be(true)
+      expect(Dir.glob(File.join(cache, "bootsnap/compile-cache-iseq/*/*"))).not_to be_empty
+
+      # Bootsnap's compile fallback on older Rubies reads source files on a cache miss.
+      command(directory, *options, env: env)
+      command(directory, *options, env: env)
+      expect(snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 0, "reused" => 1)
+
+      File.delete(index)
+      command(directory, *options, env: env)
+      expect(snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 0, "reused" => 1)
+      expect(File.file?(index)).to be(true)
+
+      File.write(threshold, "19\n")
+      _, error = command(directory, *options, env: env, expected: 4)
+      expect(error).to include("baseline failed")
     end
   end
 
