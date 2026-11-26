@@ -73,6 +73,7 @@ module Ripr
 
         probe["samples"].is_a?(Hash) && probe["samples"].all? { |site, pairs| site.is_a?(String) && samples?(pairs) }
       end
+      public :valid?
 
       def samples?(samples)
         samples.is_a?(Array) && samples.length <= 3 && samples.all? do |pair|

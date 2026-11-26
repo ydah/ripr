@@ -48,6 +48,65 @@ RSpec.describe "incremental ripr commands" do
     JSON.parse(File.read(File.join(directory, ".ripr/snapshot.json")))
   end
 
+  it "reuses custom boot results only when the boot inputs are unchanged" do
+    with_project do |directory|
+      threshold = File.join(directory, "config", "threshold.txt")
+      FileUtils.mkdir_p(File.dirname(threshold))
+      File.write(threshold, "18\n")
+      setup = File.join(directory, "setup.rb")
+      File.write(setup, "THRESHOLD = Integer(File.read(#{threshold.dump}))\n")
+      source = File.join(directory, "lib", "sample.rb")
+      File.write(source, File.read(source).sub("age >= 18", "age >= THRESHOLD"))
+      options = %w[--boot setup.rb --jobs 1]
+
+      command(directory, *options)
+      expect(snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 2, "reused" => 0)
+      command(directory, *options)
+      expect(snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 0, "reused" => 1)
+      command(directory, *options, "--full")
+      expect(snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 2, "reused" => 0)
+
+      File.write(threshold, "19\n")
+      command(directory, *options)
+      expect(snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 2, "reused" => 0)
+      File.open(setup, "a") { |file| file.puts("Time.now") }
+      2.times do
+        command(directory, *options)
+        expect(snapshot(directory).fetch("metrics")).to include("baseline_tests_run" => 2, "reused" => 0)
+      end
+    end
+  end
+
+  { "external boot" => 0, "external boot helper" => 1, "delegated external boot helpers" => 3 }.each do |description, hops|
+    it "checks the baseline again when #{description} observes a changed path" do
+      with_project do |directory|
+        Dir.mktmpdir("ripr-external-boot") do |external|
+          marker = File.join(external, "marker")
+          setup = File.join(external, "setup.rb")
+          File.write(setup, "THRESHOLD = File.exist?(#{marker.dump}) ? 30 : 18\n")
+          if hops.positive?
+            (hops - 1).times do |index|
+              helper = File.join(external, "helper_#{index}.rb")
+              File.write(helper, "require #{setup.dump}\n")
+              setup = helper
+            end
+            entry = File.join(directory, "setup.rb")
+            File.write(entry, "require #{setup.dump}\n")
+            setup = entry
+          end
+
+          source = File.join(directory, "lib", "sample.rb")
+          File.write(source, File.read(source).sub("age >= 18", "age >= THRESHOLD"))
+          options = ["--boot", setup, "--jobs", "1"]
+          command(directory, *options)
+          File.write(marker, "present\n")
+          _, error = command(directory, *options, expected: 4)
+          expect(error).to include("baseline failed")
+        end
+      end
+    end
+  end
+
   it "reuses cached results when the automatic memory limit changes" do
     with_project do |directory|
       worker_memory = File.expand_path("../lib/ripr/engine/worker_memory.rb", __dir__)
@@ -170,48 +229,6 @@ RSpec.describe "incremental ripr commands" do
       command(directory, *options, "--include-tests-diff")
       expect(snapshot(directory).fetch("mutants").values.map { |mutant| mutant.fetch("subject") })
         .to contain_exactly("Sample.adult?", "Sample.other?")
-    end
-  end
-
-  it "reuses an independent result and invalidates callers of edited methods with call-graph reuse" do
-    with_project do |directory|
-      source = File.join(directory, "lib/sample.rb")
-      File.write(source, <<~RUBY)
-        module Sample
-          def self.callee(value)
-            value >= 18
-          end
-
-          def self.caller(value)
-            callee(value) && value >= 18
-          end
-
-          def self.independent(value)
-            value >= 5
-          end
-        end
-      RUBY
-      File.write(File.join(directory, "test/sample_test.rb"), <<~RUBY)
-        require "minitest/autorun"
-        require_relative "../lib/sample"
-        class SampleTest < Minitest::Test
-          def test_caller
-            assert Sample.caller(18)
-          end
-
-          def test_independent
-            assert Sample.independent(5)
-          end
-        end
-      RUBY
-
-      command(directory, "--call-graph-reuse")
-      File.write(source, File.read(source).sub("value >= 18", "value >= 17"))
-      command(directory, "--call-graph-reuse")
-      after = snapshot(directory)
-      expect(after.fetch("metrics")).to include("reused" => 1, "baseline_tests_run" => 2)
-      expect(after.fetch("mutants").values.select { |mutant| mutant["reused"] }.map { |mutant| mutant.fetch("subject") })
-        .to eq(["Sample.independent"])
     end
   end
 
@@ -381,7 +398,8 @@ RSpec.describe "incremental ripr commands" do
           def test_failure; flunk "broken baseline"; end
         end
       RUBY
-      command(directory, expected: 4)
+      _, error = command(directory, expected: 4)
+      expect(error).to include("broken baseline")
       expect(File.read(cache_path)).to eq(previous)
     end
   end

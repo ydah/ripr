@@ -14,6 +14,95 @@ RSpec.describe "ripr command" do
     Open3.capture3(env, RbConfig.ruby, executable, *args, chdir: directory)
   end
 
+  it "restores runtime state, loaders, output, and the caller's environment after a boot failure" do
+    Dir.mktmpdir("ripr-boot-cleanup") do |directory|
+      FileUtils.mkdir_p(File.join(directory, "lib"))
+      File.write(File.join(directory, "lib/sample.rb"), "def adult?(age); age >= 18; end\n")
+      File.write(File.join(directory, "boot.rb"), <<~RUBY)
+        raise "ripr flag missing" unless ENV["RIPR"] == "1"
+        puts "boot diagnostic"
+        STDOUT.puts "descriptor diagnostic"
+        Ripr::R.current_test = "loading"
+        Ripr::R.activate("loading", 1)
+        raise "boot failed"
+      RUBY
+      program = <<~RUBY
+        require "json"
+        require "stringio"
+        require "ripr"
+        require "ripr/config"
+        require "ripr/engine/runner"
+
+        results = [nil, "caller"].map do |previous|
+          previous ? ENV["RIPR"] = previous : ENV.delete("RIPR")
+          stream = StringIO.new
+          $stdout = stream
+          failure = begin
+            config = Ripr::Config.load({ operators: ["comparison"], boot: "boot.rb", jobs: 1 })
+            Ripr::Engine::Runner.new(config).call
+          rescue => error
+            error.message
+          end
+          { "failure" => failure, "environment" => ENV["RIPR"],
+            "loaders" => Ripr::Loader.active_loaders.size, "probe" => Ripr::R.probe,
+            "current_test" => Ripr::R.current_test,
+            "variant" => Ripr::R.bin("loading", 1, 2) { |_, _, variant| variant },
+            "stdout_restored" => $stdout.equal?(stream), "captured" => stream.string }
+        end
+        STDOUT.write(JSON.generate(results))
+      RUBY
+      output, error, status = Open3.capture3(RbConfig.ruby, "-I", File.expand_path("../lib", __dir__),
+                                             "-e", program, chdir: directory)
+
+      expect(status.exitstatus).to eq(0), error
+      expected = { "failure" => "boot failed", "loaders" => 0, "probe" => nil, "current_test" => nil,
+                   "variant" => 0, "stdout_restored" => true, "captured" => "" }
+      expect(JSON.parse(output)).to eq([expected.merge("environment" => nil), expected.merge("environment" => "caller")])
+      expect(error.lines).to eq(["boot diagnostic\n", "descriptor diagnostic\n"] * 2)
+    end
+  end
+
+  it "loads project helpers from lib, test, and spec when tests use ordinary requires" do
+    Dir.mktmpdir("ripr-test-load-path") do |directory|
+      FileUtils.mkdir_p(%w[lib test spec].map { |path| File.join(directory, path) })
+      File.write(File.join(directory, "lib/sample.rb"), "module Sample; def self.adult?(age); age >= 18; end; end\n")
+      File.write(File.join(directory, "test/test_helper.rb"), "require 'minitest/autorun'\nrequire 'sample'\n")
+      File.write(File.join(directory, "spec/fixture_helper.rb"), "FIXTURE_AGE = 18\n")
+      File.write(File.join(directory, "test/sample_test.rb"), <<~RUBY)
+        require "test_helper"
+        require "fixture_helper"
+        class LoadPathTest < Minitest::Test
+          def test_boundary
+            assert Sample.adult?(FIXTURE_AGE)
+          end
+        end
+      RUBY
+
+      output, error, status = command("--full", "--jobs", "1", "--operators", "comparison", "--reporter", "agent", directory: directory)
+      expect(status.exitstatus).to eq(0), error
+      expect(JSON.parse(output).fetch("summary")).to include("killed" => 1, "survived" => 0, "error" => 0)
+    end
+  end
+
+  it "explains when no test files or runnable tests are available" do
+    Dir.mktmpdir("ripr-missing-tests") do |directory|
+      FileUtils.mkdir_p(%w[lib test].map { |path| File.join(directory, path) })
+      File.write(File.join(directory, "lib/sample.rb"), "def adult?(age); age >= 18; end\n")
+      arguments = %w[--full --operators comparison --framework minitest]
+
+      output, error, status = command(*arguments, directory: directory)
+      expect(status.exitstatus).to eq(1)
+      expect(output).to be_empty
+      expect(error).to include("no test files found")
+
+      File.write(File.join(directory, "test/empty_test.rb"), "require 'minitest/autorun'\n")
+      output, error, status = command(*arguments, directory: directory)
+      expect(status.exitstatus).to eq(4)
+      expect(output).to be_empty
+      expect(error).to include("no tests were discovered")
+    end
+  end
+
   it "classifies Minitest gaps and emits clean agent JSON" do
     stdout, stderr, status = command("--reporter", "agent", "--full", "--jobs", "2")
     expect(status.exitstatus).to eq(0), stderr
@@ -224,10 +313,129 @@ RSpec.describe "ripr command" do
     end
   end
 
+  it "reuses static plans across fresh boots until a planned source changes" do
+    analyzer = File.expand_path("../lib/ripr/core/analyzer", __dir__)
+    %w[unchanged changed added].each do |scenario|
+      Dir.mktmpdir("ripr-static-plan") do |dir|
+        FileUtils.mkdir_p([File.join(dir, "lib"), File.join(dir, "test")])
+        File.binwrite(File.join(dir, "lib/sample.rb"), "# coding: Windows-1252\nmodule Sample; COUNT = 1; LABEL = '\xE9'; end\n")
+        File.write(File.join(dir, "lib/dependency.rb"), "nil\n")
+        File.write(File.join(dir, "trace.rb"), "require #{analyzer.inspect}\n" + <<~'RUBY')
+          Ripr::Core::Analyzer.singleton_class.prepend(Module.new do
+            def call(source, path, **)
+              File.write("planned.log", "#{Process.pid} #{path}\n", mode: "a")
+              super
+            end
+          end)
+        RUBY
+        File.write(File.join(dir, "boot.rb"), <<~'RUBY')
+          raise "boot was already run" if defined?(STATIC_PLAN_BOOTED)
+          STATIC_PLAN_BOOTED = true
+          unless File.exist?("booted.log")
+            case ENV.fetch("STATIC_PLAN_SCENARIO")
+            when "changed" then File.write("lib/dependency.rb", "false\n")
+            when "added" then File.write("lib/added.rb", "nil\n")
+            end
+          end
+          File.write("booted.log", "#{Process.pid}\n", mode: "a")
+        RUBY
+        File.write(File.join(dir, "test/sample_test.rb"), <<~RUBY)
+          require "minitest/autorun"
+          require_relative "../lib/sample"
+          class SampleTest < Minitest::Test
+            def test_static_value
+              assert_equal [233], Sample::LABEL.bytes
+              assert_equal "Windows-1252", Sample::LABEL.encoding.name
+              assert_equal 1, Sample::COUNT
+            end
+          end
+        RUBY
+
+        env = { "RUBYOPT" => "#{ENV.fetch('RUBYOPT', nil)} -r#{File.join(dir, 'trace.rb')}", "STATIC_PLAN_SCENARIO" => scenario }
+        stdout, stderr, status = command("--full", "--static", "--verify-killed", "--operators", "integer_literal", "--jobs", "2",
+                                         "--boot", "boot.rb", "--reporter", "agent", directory: dir, env: env)
+        expect(status).to be_success, stderr
+        expect(JSON.parse(stdout).fetch("summary")).to include("killed" => 2, "error" => 0), scenario
+        boots = File.readlines(File.join(dir, "booted.log"), chomp: true)
+        expect(boots.uniq.size).to eq(5), scenario
+        plans = File.readlines(File.join(dir, "planned.log"), chomp: true).map { |line| line.split.first }.uniq
+        expect(plans.sort).to eq(scenario == "unchanged" ? [boots.first] : boots.sort), scenario
+      end
+    end
+  end
+
+  it "rejects an invalid acceptance ledger created after planning static mutations" do
+    Dir.mktmpdir("ripr-static-ledger") do |dir|
+      FileUtils.mkdir_p([File.join(dir, "lib"), File.join(dir, "test")])
+      File.write(File.join(dir, "lib/sample.rb"), "module Sample; COUNT = 1; end\n")
+      File.write(File.join(dir, "boot.rb"), "File.write('ripr.accepted.yml', 'invalid')\n")
+      File.write(File.join(dir, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+        class SampleTest < Minitest::Test
+          def test_static_value = assert_equal(1, Sample::COUNT)
+        end
+      RUBY
+
+      stdout, stderr, status = command("--full", "--static", "--operators", "integer_literal", "--boot", "boot.rb",
+                                       "--reporter", "agent", directory: dir)
+      expect(status).to be_success, stderr
+      expect(JSON.parse(stdout).fetch("summary")).to include("killed" => 0, "error" => 2)
+    end
+  end
+
   it "lists the extra operators when the full operator profile is selected" do
     stdout, stderr, status = command("list", "operators", "--operators", "full")
     expect(status.exitstatus).to eq(0), stderr
     expect(stdout.lines.map(&:chomp)).to include("string_literal", "regexp_literal", "collection_literal", "safe_navigation")
+  end
+
+  it "kills opt-in Ruby expression and pattern mutations" do
+    Dir.mktmpdir("ripr-ruby-operators") do |directory|
+      FileUtils.mkdir_p(%w[lib test].map { |path| File.join(directory, path) })
+      File.write(File.join(directory, "lib/sample.rb"), <<~RUBY)
+        module Sample
+          def self.range; 0...3; end
+          def self.largest(values); values.max; end
+          def self.empty?(count); count.zero?; end
+          def self.required(values); values.fetch(:required); end
+          def self.pick(value); value ||= :fallback; end
+          def self.no_odds?(values); values.none?(&:odd?); end
+
+          def self.first_number(input)
+            case input
+            in [Integer => number] then number
+            else :unknown
+            end
+          end
+        end
+      RUBY
+      File.write(File.join(directory, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+        class SampleTest < Minitest::Test
+          def test_ruby_operations
+            refute Sample.range.include?(3)
+            assert_equal 5, Sample.largest([2, 5])
+            assert Sample.empty?(0)
+            assert_raises(KeyError) { Sample.required({}) }
+            assert_equal :chosen, Sample.pick(:chosen)
+            assert Sample.no_odds?([2])
+            assert_equal 3, Sample.first_number([3])
+          end
+        end
+      RUBY
+
+      operators = %w[range_endpoint collection_query predicate_method fetch_index logical_assignment collection_none case_in]
+      stdout, stderr, status = command("--full", "--jobs", "1", "--operators", operators.join(","),
+                                       "--reporter", "agent", directory: directory)
+      expect(status.success?).to be(true), stderr
+      expect(JSON.parse(stdout).fetch("summary")).to include("killed" => operators.length, "survived" => 0, "error" => 0)
+      snapshot = JSON.parse(File.read(File.join(directory, ".ripr/snapshot.json")))
+      expect(snapshot.fetch("mutants").values.map { |mutant| mutant.values_at("operator", "status") }).to match_array(
+        operators.map { |operator| [operator, "killed"] }
+      )
+    end
   end
 
   it "checks directly mutated source and excludes mutations rejected by a type checker" do

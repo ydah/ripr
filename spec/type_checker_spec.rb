@@ -52,9 +52,11 @@ RSpec.describe "Ripr type checking" do
           *"signaled check"*) kill -TERM "$$" ;;
           *"colored diagnostic"*)
             echo 'tool warning'
-            printf '\033[31mvalue.rb:1: Expected Integer\033[0m\nvalue.rb:2: Another error\n' >&2
+            printf 'value.rb:1: Expected \033[31mInteger\033[0m\nvalue.rb:2: Another error\n' >&2
             exit 100
             ;;
+          *"long diagnostic"*) printf 'value.rb:1: %0810d\n' 0 >&2; exit 100 ;;
+          *"long failure"*) printf 'checker failed: %0810d\n' 0 >&2; exit 73 ;;
           *"wrong diagnostic exit"*) echo 'value.rb:1: Expected Integer' >&2; exit 73 ;;
           *"successful warning"*) echo 'value.rb:1:2: [warning] Redundant check'; exit 0 ;;
           *"bad return"*)
@@ -182,6 +184,18 @@ RSpec.describe "Ripr type checking" do
         expect { check.check("value.rb", "# silent exit\n") }.to raise_error(Ripr::Error, /sorbet.*exit status 73/)
         expect { check.check("value.rb", "# signaled check\n") }
           .to raise_error(Ripr::Error, /sorbet.*signal #{Signal.list.fetch('TERM')}/)
+      end
+    end
+  end
+
+  it "bounds rejection diagnostics and execution errors and restores the staged source" do
+    with_project do |directory|
+      checker.open("sorbet") do |check|
+        expect(check.check("value.rb", "# long diagnostic\n")).to eq("value.rb:1: #{'0' * 788}")
+        expect { check.check("value.rb", "# long failure\n") }
+          .to raise_error(Ripr::Error, "sorbet typecheck failed to run: checker failed: #{'0' * 784}")
+        expect(File.binread(staged_source(directory))).to eq(File.binread("value.rb"))
+        expect(check.check("value.rb", "def value; 2; end\n")).to be_nil
       end
     end
   end
