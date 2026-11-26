@@ -464,6 +464,40 @@ RSpec.describe "ripr reach-map selection" do
     end
   end
 
+  [false, true].each do |wrapped|
+    it "runs the full baseline after a #{wrapped ? 'wrapped' : 'built-in'} directory listing changes" do
+      tests = minitest.sub("class SampleTest < Minitest::Test", "INPUTS = Dir['inputs/*.txt']\nclass SampleTest < Minitest::Test")
+                      .sub("assert(Sample.positive?)", "assert_includes(INPUTS, 'inputs/first.txt')")
+      files = { ".gitignore" => "/.ripr/\n/inputs/\n", "inputs/first.txt" => "", "test/sample_test.rb" => tests }
+      if wrapped
+        files["wrap-dir.rb"] = <<~RUBY
+          Dir.singleton_class.prepend(Module.new do
+            def [](*)
+              super
+            end
+          end)
+        RUBY
+      end
+      with_project(files) do |directory|
+        environment = if wrapped
+                        options = [ENV.fetch("RUBYOPT", nil), "-r#{File.join(directory, 'wrap-dir.rb')}"].compact
+                        { "RUBYOPT" => options.join(" ") }
+                      else
+                        {}
+                      end
+        base = capture(directory, environment: environment)
+        write(directory, "lib/sample.rb", source.sub("3 + 2", "4 + 2"))
+        expect(baseline_count(select_report(directory, base, environment: environment))).to eq(1)
+
+        write(directory, "inputs/second.txt", "")
+        result = select_report(directory, base, environment: environment) do |diagnostic|
+          expect(diagnostic).to include("test discovery or load-time reach changed")
+        end
+        expect(baseline_count(result)).to eq(2)
+      end
+    end
+  end
+
   it "keeps tests that inspect source through Pathname, subprocesses, or copy_stream" do
     observers = [
       'assert_includes(Pathname.new("lib/sample.rb").read, "3 + 2")',
