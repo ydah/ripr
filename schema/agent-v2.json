@@ -101,6 +101,7 @@
           "properties": {
             "test_id": {"type": "string"},
             "call": {"type": "integer", "minimum": 1},
+            "observation": {"enum": ["implicit_return"], "description": "The call number counts observed implicit returns."},
             "original": {"type": "array"},
             "mutant": {"type": "array"}
           }
