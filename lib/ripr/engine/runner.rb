@@ -177,7 +177,7 @@ module Ripr
       end
 
       def prepare_call_graph
-        return unless @config[:call_graph_reuse] && !(@config[:boot] || @config[:rails] || @config[:static] || @config[:verify_killed])
+        return unless @config[:call_graph_reuse] && !(@config[:static] || @config[:verify_killed])
         return if @config[:baseline_runs] > 1
 
         require_relative "../core/call_graph"
