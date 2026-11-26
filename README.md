@@ -48,6 +48,8 @@ bundle exec ripr --since origin/main
 For deterministic, order-independent tests, run `bundle exec ripr reach-map` on the clean base revision, then run
 `bundle exec ripr --since origin/main --reach-map .ripr/reach-map.json` on your branch. Use a map from a trusted run with the same Ruby, environment, and test and source settings, including `--rails` when needed. Rails selection requires matching SQLite snapshots. Ripr includes tests that make opaque observations and runs the full baseline when load inputs cannot be verified. Use a full baseline for dependencies outside the recorded Ruby calls and observed file operations.
 
+Use `--reach-map-files 'test/models/*_test.rb'` only for files that register independently. Each matching file must be safe to omit without changing other tests' registration or behavior through shared hooks, helpers, or inspection of loaded files, test classes, or registries. Repeat the option to allow more paths. Ripr can skip eligible trailing files that only declare tests and repeat helper imports. It retries with all tests in a fresh process if the reduced baseline fails. Regenerate older maps to enable file skipping.
+
 Add `--include-tests-diff` to select mutations reached by tests in changed files. ripr also checks saved reach data for those files when available. A removed test file or changed test helper can select the entire target.
 
 ## Rails
@@ -126,6 +128,7 @@ Use `bundle exec ripr --help` for CLI options and `bundle exec ripr list operato
 Use `bundle exec ripr list mutants --skipped` to see excluded mutation sites and their reasons without running tests.
 
 - `--jobs auto` uses the CPU count and caps it using available memory after boot on Linux and macOS. Pass `--jobs N` to use a fixed worker count.
+- `--baseline-runs 2` repeats the baseline to detect changes in test outcomes, mutation reach, or infection. Ripr warns about unstable tests and validates the remaining tests before running mutations. Warnings list observed clock or random calls as clues. This mode bypasses the cache and verifies kills on the original code. Rails uses one worker to keep the test database and worker identity consistent.
 - `--operators full` adds string, regexp, collection, safe-navigation, compound assignment, and `case` mutations. `--full` controls the execution scope.
 - `--static` includes supported load-time mutations. ripr starts a fresh process with each mutation already active. A failure while loading the application is an execution error.
 - `--call-graph-reuse` can retain results across method-body edits if the current baseline observations and the previously executed dependencies still match. It reruns the baseline after a source change and falls back to ordinary invalidation when dependency tracking is incomplete.

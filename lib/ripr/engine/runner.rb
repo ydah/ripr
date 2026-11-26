@@ -22,6 +22,8 @@ module Ripr
     class Runner
       attr_reader :mutants, :warnings, :baseline, :framework, :sources, :static, :metrics, :profile, :changed_source_lines
 
+      class RetryFull < Ripr::Error; end
+
       Selection = Data.define(:candidates, :selected, :changed_tests) do
         def observed
           changed_tests.empty? ? selected : candidates
@@ -29,9 +31,10 @@ module Ripr
       end
       private_constant :Selection
 
-      def initialize(config, paths = [])
+      def initialize(config, paths = [], file_loading: nil)
         @config = config
         @paths = paths
+        @file_loading = file_loading
         @warnings = []
         @mutants = []
         @sources = {}
@@ -109,6 +112,7 @@ module Ripr
 
         prepare_reach_selection(selection)
         prepare_call_graph
+        prepare_test_file_loading
         run_project(selection, &)
       end
 
@@ -121,6 +125,8 @@ module Ripr
       end
 
       def record_reach_map
+        raise ArgumentError, "--baseline-runs greater than one requires run" if @config[:baseline_runs] > 1
+
         if @config[:since] || @config[:dry_run] || !@config[:only].empty?
           raise ArgumentError, "reach-map requires a complete baseline without --since, --only, or --dry-run"
         end
@@ -172,18 +178,39 @@ module Ripr
 
       def prepare_call_graph
         return unless @config[:call_graph_reuse] && !(@config[:static] || @config[:verify_killed])
+        return if @config[:baseline_runs] > 1
 
         require_relative "../core/call_graph"
         @call_graph = Core::CallGraph.new(@sources, rails: @config[:rails])
       end
 
       def prepare_reach_selection(selection)
-        return unless @config[:reach_map]
+        return unless @config[:reach_map] && @file_loading != :full
+
+        if @config[:baseline_runs] > 1
+          @warnings << "reach-map fallback: repeated baselines require all test files"
+          return
+        end
 
         require_relative "reach_selection"
         @reach_selection = ReachSelection.new(@config, @sources, selection.observed)
       rescue ReachSelection::Unusable => e
         @warnings << "reach-map fallback: #{e.message}"
+      end
+
+      def prepare_test_file_loading
+        return unless @file_loading == :prune && @reach_selection && !@config[:reach_map_files].empty?
+
+        framework = test_framework
+        files = test_file_paths(framework)
+        allowed = Dir.glob(@config[:reach_map_files]).map { |path| relative(path) }
+        return unless files.intersect?(allowed)
+
+        retained = @reach_selection.load_files(files, framework, allowed:)
+        return if retained == files
+
+        @planned_test_discovery = [framework, files]
+        @retained_test_files = retained
       end
 
       def run_project(selection, &)
@@ -197,7 +224,11 @@ module Ripr
           boot_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000
           load_reached = R.probe.snapshot.fetch("load_reached")
           R.probe = nil
-          worker_config = @config.with_worker_limit { WorkerMemory.limit }
+          worker_config = if @rails && @config[:baseline_runs] > 1
+                            Config.new(@config.to_h.merge(jobs: 1))
+                          else
+                            @config.with_worker_limit { WorkerMemory.limit }
+                          end
           prepare_rails_workers([worker_config[:jobs], selection.observed.length].min, observer: @reach_selection)
           boot_digest = @boot_context&.fingerprint(sqlite_snapshots: @rails&.cache_snapshot_paths)
           @profile&.phase("boot", started)
@@ -211,6 +242,10 @@ module Ripr
           @profile&.phase("baseline", baseline_started)
           execute_selection(selection, adapter, worker_config, boot_ms, &)
         end
+      rescue StandardError, ScriptError => e
+        raise unless @narrowed_test_files && !@metrics["baseline_reach_map"]
+
+        raise RetryFull, e.message
       end
 
       def execute_selection(selection, adapter, worker_config, boot_ms, &)
@@ -370,16 +405,21 @@ module Ripr
 
       def load_tests
         %w[lib test spec].reverse_each { |directory| $LOAD_PATH.unshift(File.expand_path(directory)) }
-        @framework = @config[:framework]
-        @framework = Dir.glob("spec/**/*_spec.rb").empty? ? "minitest" : "rspec" if @framework == "auto"
-        patterns = @config[:tests] || (@framework == "rspec" ? "spec/**/*_spec.rb" : "test/**/*_test.rb")
-        files = Array(patterns).flat_map { |pattern| Dir.glob(pattern) }.map { |file| relative(file) }.uniq.sort
-        @test_files = files
-        raise ArgumentError, "no test files found" if files.empty?
+        @framework = test_framework
+        @test_files = test_file_paths(@framework)
+        if @planned_test_discovery && @planned_test_discovery != [@framework, @test_files]
+          raise RetryFull, "test file discovery changed during boot"
+        end
+        raise ArgumentError, "no test files found" if @test_files.empty?
 
         require_relative "../integration/#{@framework}"
-        klass = @framework == "rspec" ? Integration::RSpec : Integration::Minitest
-        adapter = klass.new(files, seed: @config[:seed])
+        @narrowed_test_files = !@retained_test_files.nil?
+        files = @retained_test_files || @test_files
+        adapter = if @framework == "rspec"
+                    Integration::RSpec.new(files, seed: @config[:seed], seed_random: @config[:baseline_runs] > 1)
+                  else
+                    Integration::Minitest.new(files, seed: @config[:seed])
+                  end
         capture_load_output do
           if @call_graph && !@boot_context
             _, @load_dependencies = @call_graph.trace { adapter.load }
@@ -391,6 +431,18 @@ module Ripr
         raise BaselineFailure, "no tests were discovered" if adapter.tests.empty?
 
         adapter
+      end
+
+      def test_framework
+        framework = @config[:framework]
+        return framework unless framework == "auto"
+
+        Dir.glob("spec/**/*_spec.rb").empty? ? "minitest" : "rspec"
+      end
+
+      def test_file_paths(framework)
+        patterns = @config[:tests] || (framework == "rspec" ? "spec/**/*_spec.rb" : "test/**/*_test.rb")
+        Array(patterns).flat_map { |pattern| Dir.glob(pattern) }.map { |file| relative(file) }.uniq.sort
       end
 
       # rubocop:disable-next Style/GlobalStdStream -- Capture descriptor 1, including direct STDOUT writes.
@@ -419,12 +471,19 @@ module Ripr
         cache = BaselineCache.new(@cache.previous["baseline"], env_hash: @cache.baseline_env_hash,
                                                                source_hash: @cache.source_hash, test_hashes: @cache.test_hashes,
                                                                tests: tests, full: @config[:full] || @config[:reach_map])
-        fresh = reach_baseline(adapter, probe_table, load_reached)
-        fresh ||= probe_baseline(adapter, probe_table, cache.test_ids) unless cache.test_ids == []
+        if @config[:baseline_runs] > 1
+          require_relative "baseline_stability"
+          stability = BaselineStability.new(@config[:baseline_runs], @warnings)
+          fresh = stability.call { |ids| probe_baseline(adapter, probe_table, ids, allow_failure: true, record_outcomes: true) }
+          @metrics["baseline_tests_run"] = stability.attempted_tests
+        else
+          fresh = reach_baseline(adapter, probe_table, load_reached)
+          fresh ||= probe_baseline(adapter, probe_table, cache.test_ids) unless cache.test_ids == []
+          @metrics["baseline_tests_run"] = fresh ? fresh.fetch("tests").length : 0
+        end
         fresh&.fetch("tests")&.each_value { |test| test["file"] = relative(test.fetch("file")) }
         @baseline = cache.combine(fresh, load_reached: load_reached)
         @metrics["baseline_reused"] = cache.reused_count.positive?
-        @metrics["baseline_tests_run"] = fresh ? fresh.fetch("tests").length : 0
       end
 
       def reach_baseline(adapter, probe_table, load_reached)
@@ -440,15 +499,17 @@ module Ripr
         @metrics["baseline_reach_map"] = true
         result
       rescue ReachSelection::Unusable => e
+        raise RetryFull, e.message if @narrowed_test_files
+
         @warnings << "reach-map fallback: #{e.message}"
         nil
       end
 
-      def probe_baseline(adapter, probe_table, ids, allow_failure: false)
+      def probe_baseline(adapter, probe_table, ids, allow_failure: false, record_outcomes: false)
         run_baseline(allow_failure: allow_failure) do
           probe = Probe.new(probe_table, samples: @config[:samples])
           R.probe = probe
-          result = run_baseline_tests(adapter, ids)
+          result = run_baseline_tests(adapter, ids, record_outcomes:)
           result.merge("probe" => probe.snapshot)
         end
       end
@@ -462,10 +523,13 @@ module Ripr
         raise BaselineFailure, "baseline failed: #{messages.join('; ')}"
       end
 
-      def run_baseline_tests(adapter, test_ids)
-        return adapter.run(test_ids) unless @rails
-
-        @rails.with_worker(0) { adapter.run(test_ids) }
+      def run_baseline_tests(adapter, test_ids, record_outcomes: false)
+        run = if record_outcomes
+                -> { BaselineStability.capture { adapter.run(test_ids, record_outcomes: true) } }
+              else
+                -> { adapter.run(test_ids) }
+              end
+        @rails ? @rails.with_worker(0, &run) : run.call
       end
 
       def prepare_rails_workers(count, observer:)

@@ -17,6 +17,7 @@ module SelfMutateEngine
   CLI_TESTS = ["spec/cli_spec.rb"].freeze
   SUITES = {
     "baseline_cache.rb" => ["spec/baseline_cache_spec.rb", *CACHE_TESTS],
+    "baseline_stability.rb" => %w[spec/baseline_stability_cli_spec.rb spec/reach_selection_cli_spec.rb],
     "boot_context.rb" => %w[spec/boot_context_spec.rb spec/cache_cli_spec.rb],
     "child.rb" => %w[spec/engine_spec.rb],
     "method_exits.rb" => %w[spec/method_exits_spec.rb spec/propagation_cli_spec.rb],
@@ -26,7 +27,8 @@ module SelfMutateEngine
     "reach_selection.rb" => %w[spec/reach_selection_cli_spec.rb],
     "result_cache.rb" => ["spec/result_cache_spec.rb", *CACHE_TESTS],
     "runner.rb" => ["spec/mutation_plan_spec.rb", "spec/cli_spec.rb", "spec/cache_cli_spec.rb", CALL_GRAPH_REUSE_TEST,
-                    "spec/profile_spec.rb", "spec/reach_map_cli_spec.rb", "spec/reach_selection_cli_spec.rb"],
+                    "spec/profile_spec.rb", "spec/reach_map_cli_spec.rb", "spec/reach_selection_cli_spec.rb",
+                    "spec/baseline_stability_cli_spec.rb"],
     "runtime.rb" => %w[spec/runtime_spec.rb spec/instrumenter_spec.rb],
     "scheduler.rb" => ["spec/kill_order_spec.rb", CALL_GRAPH_REUSE_TEST, "spec/cli_spec.rb", "spec/propagation_cli_spec.rb"],
     "static_run.rb" => ["spec/static_run_spec.rb", *CLI_TESTS],
