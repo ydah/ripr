@@ -45,6 +45,9 @@ bundle exec ripr --since origin/main
 
 `--since` selects mutations on lines changed since the merge base, including staged, unstaged, and untracked source changes. Use `--scope method` to include every mutation in a touched method. The score and quality gates apply to the selected mutations.
 
+For deterministic, order-independent tests, run `bundle exec ripr reach-map` on the clean base revision, then run
+`bundle exec ripr --since origin/main --reach-map .ripr/reach-map.json` on your branch. Use a map from a trusted run with the same Ruby, environment, and test and source settings, including `--rails` when needed. Rails selection requires matching SQLite snapshots. Ripr includes tests that make opaque observations and runs the full baseline when load inputs cannot be verified. Use a full baseline for dependencies outside the recorded Ruby calls and observed file operations.
+
 Add `--include-tests-diff` to select mutations reached by tests in changed files. ripr also checks saved reach data for those files when available. A removed test file or changed test helper can select the entire target.
 
 ## Rails
@@ -145,7 +148,11 @@ steps:
   - run: bundle exec ripr --since origin/main --reporter text --reporter github
 ```
 
-The `github` reporter adds annotations for surviving mutations. The [composite action](action.yml) also caches `.ripr/`. After establishing a baseline, add `--fail-on-survived` or `--threshold 80` to enforce a quality gate.
+The `github` reporter adds annotations for surviving mutations. The [composite action](action.yml) also caches `.ripr/snapshot.json`. After establishing a baseline, add `--fail-on-survived` or `--threshold 80` to enforce a quality gate.
+
+For suites whose tests can run independently, use `reach-map: record` in the action on default-branch pushes or a schedule. In the `pull_request` workflow, set `reach-map: use` and `reach-map-workflow` to the recording workflow's filename. Give the PR job `actions: read` and use the same runner type, Ruby, and bundle setup in both jobs. The action uses a reach map from a successful run for the exact merge base when one is available, and runs the ordinary baseline on a miss.
+
+Both modes keep the Ruby, Bundler, locale, and workspace environment and drop other variables. Set the same space-separated `reach-map-env` list in both workflows for additional inputs such as `RAILS_ENV` or project-specific test settings. The CLI checks the full resulting environment before using the map.
 
 | Exit code | Meaning |
 | --- | --- |

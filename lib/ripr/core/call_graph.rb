@@ -15,6 +15,7 @@ module Ripr
       REFLECTIVE_OWNERS = [Kernel, Kernel.singleton_class, BasicObject, Module, Binding].freeze
       INSTRUCTION_READS = %i[disasm disassemble to_binary to_a].freeze
       STRUCTURAL_NODES = %i[def_node class_node module_node singleton_class_node pre_execution_node post_execution_node].freeze
+      DEFERRED_NODES = %i[block_node lambda_node].freeze
       RAILS_GENERATORS = {
         "activerecord" => { class_eval: %w[
           association_relation associations/collection_proxy attribute_methods attribute_methods/primary_key core inheritance
@@ -35,6 +36,7 @@ module Ripr
         @files = {}
         @hashes = {}
         @lines = {}
+        @deferred_methods = []
         layouts = sources.sort.map { |path, source| inventory(path, source) }
         @structure_hash = Digest::SHA256.hexdigest(Marshal.dump(layouts)) unless layouts.include?(nil)
       end
@@ -44,6 +46,22 @@ module Ripr
                       dependencies.all? { |key| key.is_a?(String) && @hashes.key?(key) }
 
         @hashes.slice(*dependencies)
+      end
+
+      def method_hashes
+        @hashes.dup.freeze
+      end
+
+      def deferred_methods
+        @deferred_methods.dup.freeze
+      end
+
+      def source_path(path)
+        @files[path]
+      end
+
+      def methods_at(path, line, name)
+        @lines.fetch(path).fetch(line, []).select { |key| key.end_with?(":#{name}") }
       end
 
       def trace(&)
@@ -75,19 +93,21 @@ module Ripr
         parsed = Prism.parse(source, filepath: path)
         return if parsed.failure?
 
+        path = path.dup.freeze
         @files[path] = @files[File.expand_path(path)] = path
         @files[File.realpath(path)] = path if File.file?(path)
         @lines[path] = {}
         sections = [path]
         cursor = 0
-        editable_methods(parsed.value).sort_by { |node| node.location.start_offset }.each do |node|
+        editable_methods(parsed.value).sort_by { |node, _| node.location.start_offset }.each do |node, kind|
           location = node.body.location
           definition = node.location
           sections << source.byteslice(cursor...location.start_offset)
           sections << [definition.start_line, definition.start_column, location.start_line, location.end_line]
           cursor = location.end_offset
-          key = "#{path.bytesize}:#{path}:#{definition.start_line}:#{definition.start_column}:#{node.name}"
-          @hashes[key] = Digest::SHA256.hexdigest(location.slice)
+          key = "#{path.bytesize}:#{path}:#{definition.start_line}:#{definition.start_column}:#{node.name}".freeze
+          @hashes[key] = Digest::SHA256.hexdigest(location.slice).freeze
+          @deferred_methods << key if kind == :deferred
           (definition.start_line..definition.end_line).each { |line| (@lines[path][line] ||= []) << key }
         end
         sections << source.byteslice(cursor..)
@@ -99,7 +119,8 @@ module Ripr
         until pending.empty?
           node = pending.pop
           if node.is_a?(Prism::DefNode)
-            methods << node if editable?(node)
+            kind = method_body_kind(node)
+            methods << [node, kind] if kind
           else
             pending.concat(node.compact_child_nodes)
           end
@@ -107,21 +128,23 @@ module Ripr
         methods
       end
 
-      def editable?(definition)
+      def method_body_kind(definition)
         body = definition.body
-        return false unless body && (definition.receiver.nil? || definition.receiver.is_a?(Prism::SelfNode))
+        return unless body && (definition.receiver.nil? || definition.receiver.is_a?(Prism::SelfNode))
 
         location = body.location
-        pending = body.compact_child_nodes
+        kind = :inline
+        pending = [body]
         until pending.empty?
           node = pending.pop
-          return false if STRUCTURAL_NODES.include?(node.type) || node.location.start_offset < location.start_offset ||
-                          node.location.end_offset > location.end_offset ||
-                          (node.respond_to?(:opening_loc) && node.opening_loc&.slice&.start_with?("<<"))
+          return if STRUCTURAL_NODES.include?(node.type) || node.location.start_offset < location.start_offset ||
+                    node.location.end_offset > location.end_offset ||
+                    (node.respond_to?(:opening_loc) && node.opening_loc&.slice&.start_with?("<<"))
 
+          kind = :deferred if DEFERRED_NODES.include?(node.type)
           pending.concat(node.compact_child_nodes)
         end
-        true
+        kind
       end
 
       def gem_prefix(name)

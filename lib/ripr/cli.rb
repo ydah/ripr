@@ -22,7 +22,7 @@ module Ripr
     end
 
     def call
-      command = %w[run list init accept init-skill mcp].include?(@arguments.first) ? @arguments.shift : "run"
+      command = %w[run list init accept init-skill mcp reach-map].include?(@arguments.first) ? @arguments.shift : "run"
       @list_kind = @arguments.shift if command == "list" && %w[mutants operators].include?(@arguments.first)
       parser.parse!(@arguments)
       return 0 if @help
@@ -52,8 +52,9 @@ module Ripr
 
     def parser
       OptionParser.new do |options|
-        options.banner = "Usage: ripr [run|list|init|accept|init-skill|mcp] [options] [PATHS...]"
+        options.banner = "Usage: ripr [run|list|init|accept|init-skill|mcp|reach-map] [options] [PATHS...]"
         options.on("--since REF") { |v| @overrides[:since] = v }
+        options.on("--reach-map FILE", "Select baseline tests for --since using a trusted reach map") { |v| @overrides[:reach_map] = v }
         options.on("--scope SCOPE") { |v| @overrides[:scope] = v }
         options.on("--framework FRAMEWORK") { |v| @overrides[:framework] = v }
         options.on("--tests GLOB") { |v| (@overrides[:tests] ||= []) << v }
@@ -102,6 +103,7 @@ module Ripr
       return init if command == "init"
       return init_skill if command == "init-skill"
       return accept(config) if command == "accept"
+      return record_reach_map(config) if command == "reach-map"
 
       if command == "list" && @list_kind == "operators"
         @stdout.puts config[:operators]
@@ -129,6 +131,12 @@ module Ripr
       return 2 if config[:fail_on_survived] && summary.fetch("survived").positive?
       return 2 if config[:thresholds]["break"] && summary.fetch("score") < config[:thresholds].fetch("break")
 
+      0
+    end
+
+    def record_reach_map(config)
+      path = Engine::Runner.new(config, @arguments).record_reach_map
+      @stdout.puts "Wrote #{path}"
       0
     end
 
