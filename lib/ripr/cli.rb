@@ -24,11 +24,14 @@ module Ripr
     end
 
     def call
-      command = %w[run list init accept init-skill mcp reach-map].include?(@arguments.first) ? @arguments.shift : "run"
+      command = %w[run list init accept init-skill mcp reach-map shard-plan merge].include?(@arguments.first) ? @arguments.shift : "run"
       @list_kind = @arguments.shift if command == "list" && %w[mutants operators].include?(@arguments.first)
       parser.parse!(@arguments)
       return 0 if @help
+      raise ArgumentError, "--skipped requires ripr list mutants" if @list_skipped && (command != "list" || @list_kind == "operators")
       return mcp if command == "mcp"
+
+      @shard_total = @arguments.shift if command == "shard-plan"
 
       directory = @arguments.length == 1 && File.directory?(@arguments.first) &&
                   (File.directory?(File.join(@arguments.first, "test")) || File.directory?(File.join(@arguments.first, "spec")))
@@ -57,8 +60,10 @@ module Ripr
 
     def parser
       OptionParser.new do |options|
-        options.banner = "Usage: ripr [run|list|init|accept|init-skill|mcp|reach-map] [options] [PATHS...]"
+        options.banner = "Usage: ripr [run|list|init|accept|init-skill|mcp|reach-map|shard-plan TOTAL|merge] [options] [PATHS...]"
         options.on("--since REF") { |v| @overrides[:since] = v }
+        options.on("--shard INDEX/TOTAL", "Run one slice from a shared baseline plan") { |v| @overrides[:shard] = v }
+        options.on("--shard-plan PATH", "Path to the shared shard plan") { |v| @overrides[:shard_plan] = v }
         options.on("--reach-map FILE", "Select baseline tests for --since using a trusted reach map") { |v| @overrides[:reach_map] = v }
         options.on("--reach-map-files GLOB", "Allow matching independent test files to be skipped (repeatable)") do |pattern|
           (@overrides[:reach_map_files] ||= []) << pattern
@@ -75,6 +80,7 @@ module Ripr
         options.on("--timeout-factor F", Float) { |v| (@overrides[:timeout] ||= {})["factor"] = v }
         options.on("--timeout-base MS", Float) { |v| (@overrides[:timeout] ||= {})["base_ms"] = v }
         options.on("--seed N", Integer) { |v| @overrides[:seed] = v }
+        options.on("--baseline-runs N", Integer, "Repeat the baseline to detect unstable tests") { |v| @overrides[:baseline_runs] = v }
         options.on("--no-samples") { @overrides[:samples] = false }
         options.on("--boot FILE") { |v| @overrides[:boot] = v }
         options.on("--typecheck CHECKER") { |v| @overrides[:typecheck] = v }
@@ -83,6 +89,7 @@ module Ripr
           options.on("--#{name}") { @overrides[name.tr("-", "_").to_sym] = true }
         end
         options.on("--reason TEXT") { |v| @reason = v }
+        options.on("--skipped", "List excluded mutation sites with reasons") { @list_skipped = true }
         options.on("--dir DIR") { |v| @skill_dir = v }
         options.on("--force") { @force = true }
         options.on("--version") do
@@ -107,10 +114,21 @@ module Ripr
 
     def execute(command)
       config = Config.load(command == "list" ? @overrides.merge(dry_run: true) : @overrides)
+      if command == "merge"
+        raise ArgumentError, "merge does not take --shard or --dry-run" if config[:shard] || config[:dry_run]
+
+        require_relative "engine/shard_report"
+        summary = Engine::ShardReport.write(config, config[:shard_plan] || Engine::ShardPlan::PATH, @arguments, stdout: @stdout)
+        return quality_exit(config, summary)
+      end
+      if (config[:shard] && command != "run") || (config[:shard_plan] && !config[:shard] && command != "shard-plan")
+        raise ArgumentError, "use --shard with run and --shard-plan with shard-plan, --shard, or merge"
+      end
       return init if command == "init"
       return init_skill if command == "init-skill"
       return accept(config) if command == "accept"
       return record_reach_map(config) if command == "reach-map"
+      return record_shard_plan(config) if command == "shard-plan"
 
       if command == "list" && @list_kind == "operators"
         @stdout.puts config[:operators]
@@ -119,6 +137,8 @@ module Ripr
       raise ArgumentError, "#{command} is not available yet" unless %w[run list].include?(command)
 
       runner = Engine::Runner.new(config, @arguments, file_loading: @file_loading)
+      return list_skipped(runner) if @list_skipped
+
       runner.plan
       results = if command == "list"
                   runner.mutants.map { |mutant| mutant.to_record.merge("status" => "planned") }
@@ -133,6 +153,12 @@ module Ripr
       runner.profile&.phase("report", report_started)
       runner.profile&.write(config[:report_dir], results.length, runner.metrics, runner.baseline)
       return 0 if config[:dry_run] || command == "list"
+      return 0 if config[:shard]
+
+      quality_exit(config, summary)
+    end
+
+    def quality_exit(config, summary)
       return 2 if config[:fail_on_survived] && summary.fetch("survived").positive?
       return 2 if config[:thresholds]["break"] && summary.fetch("score") < config[:thresholds].fetch("break")
 
@@ -142,6 +168,23 @@ module Ripr
     def record_reach_map(config)
       path = Engine::Runner.new(config, @arguments).record_reach_map
       @stdout.puts "Wrote #{path}"
+      0
+    end
+
+    def record_shard_plan(config)
+      runner = Engine::Runner.new(config, @arguments)
+      path = runner.record_shard_plan(@shard_total)
+      runner.warnings.each { |message| @stderr.puts "ripr: #{message}" }
+      @stdout.puts "Wrote #{path}"
+      0
+    end
+
+    def list_skipped(runner)
+      skipped = []
+      runner.plan(skipped: skipped)
+      skipped.uniq.sort.each do |path, line, column, reason|
+        @stdout.puts "#{path}:#{line}:#{column} #{reason.gsub(/[\r\n]+/, ' ')}"
+      end
       0
     end
 

@@ -143,6 +143,14 @@ RSpec.describe "ripr reach-map selection" do
           expect(File).not_to exist(File.join(directory, ".ripr/snapshot.json"))
           full = report(directory, base, environment: environment)
           expect(selected.values_at("summary", "gaps")).to eq(full.values_at("summary", "gaps"))
+
+          repeated_flags = ["--reach-map-files", pattern, "--baseline-runs", "2"]
+          repeated = select_report(directory, base, *repeated_flags, environment: environment) do |diagnostic|
+            expect(diagnostic).to include("repeated baselines require all test files")
+          end
+          expect(baseline_count(repeated)).to eq(4)
+          expect(File.readlines(audit, chomp: true)).to include(ineligible)
+          expect(repeated.values_at("summary", "gaps")).to eq(full.values_at("summary", "gaps"))
         end
       end
     end

@@ -14,6 +14,7 @@ require_relative "result_cache"
 require_relative "scheduler"
 require_relative "static_run"
 require_relative "worker_memory"
+require "digest"
 require "pathname"
 require "tempfile"
 
@@ -49,22 +50,15 @@ module Ripr
         @profile = Profile.new
       end
 
-      def plan
+      def plan(skipped: nil)
         return @mutants if @planned
 
         started = @profile&.now
-        patterns = if @paths.empty?
-                     @config[:include]
-                   else
-                     @paths.map { |p| File.directory?(p) ? "#{p}/**/*.rb" : p }
-                   end
-        files = patterns.flat_map { |pattern| Dir.glob(pattern) }.uniq.sort.select { |p| File.file?(p) && p.end_with?(".rb") }
-        files.map! { |path| relative(path) }
-        files.uniq!
-        files.reject! { |path| @config[:exclude].any? { |pattern| File.fnmatch?(pattern, path, File::FNM_PATHNAME) } }
-        files.each do |path|
+        @plan_root = Dir.pwd
+        source_paths.each do |path|
           analysis = Core::Analyzer.call(
-            File.binread(path), path, operators: @config[:operators], arid_callees: @config[:arid_callees], static: @config[:static]
+            File.binread(path), path,
+            operators: @config[:operators], arid_callees: @config[:arid_callees], static: @config[:static], skipped: skipped
           )
           source = @sources[path] = analysis.fetch(:source)
           instrument_started = @profile&.now
@@ -74,8 +68,11 @@ module Ripr
           @table.merge!(instrumented.fetch(:site_table))
           unsupported = instrumented.fetch(:invalid)
           planned = analysis.fetch(:mutants).map do |mutant|
-            invalid = unsupported.include?(mutant.fetch(:id)) || mutant[:invalid]
-            Mutant.from_analysis(mutant, invalid: invalid)
+            reason = if mutant[:invalid] then "replacement is invalid Ruby"
+                     elsif unsupported.include?(mutant.fetch(:id)) then "unsupported instrumentation"
+                     end
+            mutant = mutant.merge(invalid_reason: reason) if reason
+            Mutant.from_analysis(mutant, invalid: reason ? true : nil)
           end
           @mutants.concat(planned)
           @warnings.concat(analysis.fetch(:warnings) + instrumented.fetch(:warnings))
@@ -94,6 +91,7 @@ module Ripr
           end
         end
         @mutants.freeze
+        collect_skipped_mutants(skipped) if skipped
         @planned = true
         @profile&.phase("plan", started)
         @mutants
@@ -102,6 +100,12 @@ module Ripr
       def call(&)
         plan unless @planned
         selection = select_mutants
+        if @config[:shard]
+          require_relative "shard_plan"
+          index, total = ShardPlan.slice(@config[:shard])
+          return run_sharding(selection, index:, total:, &)
+        end
+
         return selection.selected.map { |mutant| mutant.to_record.merge("status" => "planned") } if @config[:dry_run]
         return [] if selection.observed.empty?
 
@@ -111,15 +115,31 @@ module Ripr
         run_project(selection, &)
       end
 
-      def run_static(full_id, test_ids)
-        plan
-        mutant = @mutants.find { |entry| entry.full_id == full_id && entry.static } if full_id
-        raise ArgumentError, "static mutation changed before execution: #{full_id}" if full_id && !mutant
+      def record_shard_plan(count)
+        require_relative "shard_plan"
+        plan unless @planned
+        run_sharding(select_mutants, index: nil, total: ShardPlan.total(count))
+      end
 
-        with_project(active: mutant) { |adapter| capture_load_output { adapter.run(test_ids, fail_fast: true) } }
+      def run_static(full_id, test_ids, prepared: nil)
+        if restore_static_plan(prepared, full_id)
+          AcceptLedger.new.read
+          active = prepared.fetch("activations")[full_id]
+        else
+          plan
+          if full_id
+            mutant = @mutants.find { |entry| entry.full_id == full_id && entry.static }
+            raise ArgumentError, "static mutation changed before execution: #{full_id}" unless mutant
+
+            active = static_activation(mutant)
+          end
+        end
+        with_project(active: active) { |adapter| capture_load_output { adapter.run(test_ids, fail_fast: true) } }
       end
 
       def record_reach_map
+        raise ArgumentError, "--baseline-runs greater than one requires run" if @config[:baseline_runs] > 1
+
         if @config[:since] || @config[:dry_run] || !@config[:only].empty?
           raise ArgumentError, "reach-map requires a complete baseline without --since, --only, or --dry-run"
         end
@@ -148,6 +168,59 @@ module Ripr
 
       private
 
+      def source_paths
+        patterns = if @paths.empty?
+                     @config[:include]
+                   else
+                     @paths.map { |p| File.directory?(p) ? "#{p}/**/*.rb" : p }
+                   end
+        files = patterns.flat_map { |pattern| Dir.glob(pattern) }.uniq.sort.select { |p| File.file?(p) && p.end_with?(".rb") }
+        files.map! { |path| relative(path) }
+        files.uniq!
+        files.reject { |path| @config[:exclude].any? { |pattern| File.fnmatch?(pattern, path, File::FNM_PATHNAME) } }
+      end
+
+      def static_plan
+        {
+          root: @plan_root,
+          sources: @sources.transform_values { |source| Digest::SHA256.hexdigest(source) },
+          codes: @codes.transform_values { |code| [code.encoding.name, [code].pack("m0")] },
+          table: @table,
+          activations: @mutants.each_with_object({}) do |mutant, activations|
+            activations[mutant.full_id] ||= static_activation(mutant) if mutant.static && !mutant.invalid
+          end
+        }
+      end
+
+      def restore_static_plan(prepared, full_id)
+        return unless prepared.is_a?(Hash) && prepared["root"] == Dir.pwd
+        return if full_id && !prepared.fetch("activations").key?(full_id)
+
+        sources = prepared.fetch("sources")
+        return unless source_paths == sources.keys && sources.all? { |path, digest| Digest::SHA256.file(path).hexdigest == digest }
+
+        codes = prepared.fetch("codes").transform_values { |encoding, bytes| bytes.unpack1("m0").force_encoding(encoding) }
+        @table = prepared.fetch("table")
+        @codes = codes
+        true
+      rescue KeyError, TypeError, ArgumentError, SystemCallError, IOError
+        false
+      end
+
+      def static_activation(mutant)
+        [mutant.site, @table.fetch(mutant.site).index(mutant.id) + 1]
+      end
+
+      def collect_skipped_mutants(skipped)
+        @mutants.each do |mutant|
+          reason = mutant.accepted ? "accepted: #{mutant.accepted}" : mutant.invalid_reason
+          next unless reason
+
+          location = mutant.location
+          skipped << [location.file, location.line, location.column, reason]
+        end
+      end
+
       def select_mutants
         started = @profile&.now
         candidates = select_ids(@mutants)
@@ -160,14 +233,20 @@ module Ripr
       end
 
       def prepare_call_graph
-        return unless @config[:call_graph_reuse] && !(@config[:boot] || @config[:rails] || @config[:static] || @config[:verify_killed])
+        return unless @config[:call_graph_reuse] && !(@config[:static] || @config[:verify_killed])
+        return if @config[:baseline_runs] > 1
 
         require_relative "../core/call_graph"
-        @call_graph = Core::CallGraph.new(@sources)
+        @call_graph = Core::CallGraph.new(@sources, rails: @config[:rails])
       end
 
       def prepare_reach_selection(selection)
         return unless @config[:reach_map] && @file_loading != :full
+
+        if @config[:baseline_runs] > 1
+          @warnings << "reach-map fallback: repeated baselines require all test files"
+          return
+        end
 
         require_relative "reach_selection"
         @reach_selection = ReachSelection.new(@config, @sources, selection.observed)
@@ -190,22 +269,73 @@ module Ripr
         @retained_test_files = retained
       end
 
+      def run_sharding(selection, index:, total:, &)
+        if @config[:dry_run] || @config[:reach_map] || @config[:baseline_runs] > 1
+          raise ArgumentError, "sharding requires one full baseline and cannot use --dry-run, --reach-map, or repeated baselines"
+        end
+
+        probe_table = @table.slice(*selection.observed.map(&:site).uniq)
+        @sharding = ShardPlan.new(@config, @sources, probe_table, index:, total:)
+        return run_project(selection, &) unless selection.observed.empty?
+
+        @baseline = empty_baseline
+        if @sharding.document
+          unless @sharding.document.data.values_at("baseline", "cache") == [@baseline, nil]
+            raise ArgumentError, "shard plan has an invalid empty baseline"
+          end
+
+          @sharding.select([])
+          @static = 0
+          @sharding.write_result(@config[:report_dir], [])
+          []
+        else
+          write_shard_plan([], {}, {})
+        end
+      end
+
       def run_project(selection, &)
         probe_table = @table.slice(*selection.observed.map(&:site).uniq)
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        with_project(probe: Probe.new(probe_table, samples: @config[:samples]), observer: @reach_selection) do |adapter|
+        environment_hash = Snapshot.environment_hash
+        if @config[:boot] || @config[:rails]
+          require_relative "boot_context"
+          @boot_context = BootContext.new(boot: @config[:boot], rails: @config[:rails], source_paths: @sources.keys)
+        end
+        observer = @sharding || @reach_selection
+        with_project(probe: Probe.new(probe_table, samples: @config[:samples]), observer:) do |adapter|
           boot_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000
           load_reached = R.probe.snapshot.fetch("load_reached")
           R.probe = nil
-          worker_config = @config.with_worker_limit { WorkerMemory.limit }
-          prepare_rails_workers([worker_config[:jobs], selection.observed.length].min, observer: @reach_selection)
+          worker_config = if @rails && (@sharding || @config[:baseline_runs] > 1)
+                            Config.new(@config.to_h.merge(jobs: 1))
+                          else
+                            @config.with_worker_limit { WorkerMemory.limit }
+                          end
+          prepare_rails_workers([worker_config[:jobs], selection.observed.length].min, observer:)
+          boot_digest = @boot_context&.fingerprint(sqlite_snapshots: @rails&.cache_snapshot_paths)
           @profile&.phase("boot", started)
           baseline_started = @profile&.now
           method_hashes = @mutants.to_h { |mutant| [mutant.full_id, mutant.method_hash] }
-          @cache = ResultCache.new(@config, sources: @sources, test_files: @test_files, framework: @framework, method_hashes:,
-                                            test_ids: adapter.tests.map { |test| test.fetch("id") }, probe_sites: probe_table.keys,
-                                            graph: @call_graph, load_dependencies: @load_dependencies)
+          test_ids = adapter.tests.map { |test| test.fetch("id") }
+          @cache = ResultCache.new(
+            @config,
+            sources: @sources,
+            test_files: @test_files,
+            framework: @framework,
+            method_hashes:,
+            test_ids:,
+            probe_sites: probe_table.keys,
+            graph: @call_graph,
+            load_dependencies: @load_dependencies,
+            shared_baseline: !@sharding.nil?,
+            environment_hash:,
+            boot_digest: boot_digest
+          )
           Process.warmup
+          if @sharding
+            @shard_boot = @sharding.boot_identity(@framework, @test_files, discovered_tests(adapter), @rails, load_reached)
+            @sharding.validate_boot!(@shard_boot) if @sharding.document
+          end
           prepare_baseline(adapter, probe_table, load_reached)
           @profile&.phase("baseline", baseline_started)
           execute_selection(selection, adapter, worker_config, boot_ms, &)
@@ -220,15 +350,42 @@ module Ripr
         started = @profile&.now
         selected = selection.selected
         selected |= select_test_mutants(selection.candidates, selection.changed_tests) unless selection.changed_tests.empty?
-        selected = check_types(selected) if @config[:typecheck]
-        static_run = StaticRun.new(worker_config, @paths, boot_ms: boot_ms)
+        static_run = StaticRun.new(worker_config, @paths, boot_ms: boot_ms, &method(:static_plan))
         scheduler = Scheduler.new(worker_config, @baseline, @table, @cache, targets: method(:method_targets), warnings: @warnings,
                                                                             metrics: @metrics, rails: @rails,
                                                                             static_run: static_run, profile: @profile)
+        if @sharding
+          return write_shard_plan(selected, scheduler.shard_costs(selected), @shard_boot) unless @sharding.document
+
+          selected = @sharding.select(selected)
+          @static = 0
+        end
+        selected = check_types(selected) if @config[:typecheck]
         results = scheduler.call(selected, adapter, &)
         @profile&.phase("mutation", started)
-        @cache.write(results, @baseline, @metrics) unless @metrics["baseline_reach_map"]
+        if @sharding
+          @sharding.write_result(@config[:report_dir], results)
+        elsif !@metrics["baseline_reach_map"]
+          @cache.write(results, @baseline, @metrics)
+        end
         results
+      end
+
+      def empty_baseline
+        { "success" => true, "failures" => [], "tests" => {},
+          "probe" => { "reach" => {}, "infect" => {}, "samples" => {}, "load_reached" => [] } }
+      end
+
+      def write_shard_plan(selected, costs, boot)
+        run = { "since" => @config[:since], "scope" => @config[:scope], "framework" => @framework, "metrics" => @metrics }
+        report = { "run" => run, "public_subjects" => public_subjects,
+                   "changed_source_lines" => @changed_source_lines, "static" => @static }
+        shards = ShardPlan.assign(costs, @sharding.total)
+        @sharding.write(boot:, baseline: @baseline, shards:, selected:, report:, cache: cache_metadata)
+      end
+
+      def cache_metadata
+        { "env_hash" => @cache.env_hash, "source_hash" => @cache.source_hash, "test_hashes" => @cache.test_hashes } if @cache
       end
 
       def method_targets
@@ -251,24 +408,25 @@ module Ripr
         if @config[:rails]
           require_relative "../integration/rails"
           @rails = Integration::Rails.new(boot: @config[:boot])
-          capture_load_output { @rails.prepare }
+          capture_load_output { observe_boot { @rails.prepare } }
         end
         reject_preloaded_sources
         @loader = Loader.new(@codes).install
         R.configure(@table, samples: @config[:samples])
         R.probe = probe
-        if active
-          site = active.site
-          R.activate(site, @table.fetch(site).index(active.id) + 1)
-        end
+        R.activate(*active) if active
         if @rails
-          capture_load_output { @rails.boot }
+          capture_load_output { observe_boot { @rails.boot } }
         elsif (boot = @config[:boot])
           raise ArgumentError, "boot file does not exist: #{boot}" unless File.file?(boot)
 
-          capture_load_output { require File.expand_path(boot) }
+          capture_load_output { observe_boot { require File.expand_path(boot) } }
         end
-        load_tests
+        observe_boot { load_tests }
+      end
+
+      def observe_boot(&)
+        @boot_context ? @boot_context.observe(&) : yield
       end
 
       def reject_preloaded_sources
@@ -326,6 +484,8 @@ module Ripr
       end
 
       def select_test_mutants(mutants, changed_files)
+        return mutants if @sharding
+
         definitions = @baseline.fetch("tests")
         files = definitions.values.map { |test| test.fetch("file") }
         return mutants unless (changed_files - files).empty?
@@ -377,14 +537,19 @@ module Ripr
         raise ArgumentError, "no test files found" if @test_files.empty?
 
         require_relative "../integration/#{@framework}"
-        klass = @framework == "rspec" ? Integration::RSpec : Integration::Minitest
         @narrowed_test_files = !@retained_test_files.nil?
-        adapter = klass.new(@retained_test_files || @test_files, seed: @config[:seed])
+        files = @retained_test_files || @test_files
+        adapter = if @framework == "rspec"
+                    Integration::RSpec.new(files, seed: @config[:seed], seed_random: !@sharding.nil? || @config[:baseline_runs] > 1)
+                  else
+                    Integration::Minitest.new(files, seed: @config[:seed])
+                  end
         capture_load_output do
-          if @call_graph
+          if @call_graph && !@boot_context
             _, @load_dependencies = @call_graph.trace { adapter.load }
           else
             adapter.load
+            @load_dependencies = [] if @boot_context
           end
         end
         raise BaselineFailure, "no tests were discovered" if adapter.tests.empty?
@@ -426,16 +591,76 @@ module Ripr
       end
 
       def prepare_baseline(adapter, probe_table, load_reached)
-        tests = adapter.tests.map { |test| test.merge("file" => relative(test.fetch("file"))) }
+        tests = discovered_tests(adapter)
         cache = BaselineCache.new(@cache.previous["baseline"], env_hash: @cache.baseline_env_hash,
                                                                source_hash: @cache.source_hash, test_hashes: @cache.test_hashes,
                                                                tests: tests, full: @config[:full] || @config[:reach_map])
-        fresh = reach_baseline(adapter, probe_table, load_reached)
-        fresh ||= probe_baseline(adapter, probe_table, cache.test_ids) unless cache.test_ids == []
+        if @sharding&.document
+          use_shard_baseline(cache, tests, probe_table)
+          return
+        elsif @config[:baseline_runs] > 1
+          require_relative "baseline_stability"
+          stability = BaselineStability.new(@config[:baseline_runs], @warnings)
+          fresh = stability.call { |ids| probe_baseline(adapter, probe_table, ids, allow_failure: true, record_outcomes: true) }
+          @metrics["baseline_tests_run"] = stability.attempted_tests
+        else
+          fresh = reach_baseline(adapter, probe_table, load_reached)
+          fresh ||= probe_baseline(adapter, probe_table, cache.test_ids) unless cache.test_ids == []
+          @metrics["baseline_tests_run"] = fresh ? fresh.fetch("tests").length : 0
+        end
         fresh&.fetch("tests")&.each_value { |test| test["file"] = relative(test.fetch("file")) }
         @baseline = cache.combine(fresh, load_reached: load_reached)
         @metrics["baseline_reused"] = cache.reused_count.positive?
-        @metrics["baseline_tests_run"] = fresh ? fresh.fetch("tests").length : 0
+        return unless @sharding
+
+        @baseline["outcomes"] = fresh.fetch("outcomes")
+        @shard_boot["test_load_inputs"] = fresh.fetch("test_load_inputs")
+        @sharding.validate_test_load_inputs!(@shard_boot.fetch("test_load_inputs"))
+        validate_shard_baseline(cache, tests, probe_table)
+      end
+
+      def discovered_tests(adapter)
+        adapter.tests.map { |test| test.merge("file" => relative(test.fetch("file"))) }
+      end
+
+      def use_shard_baseline(cache, tests, probe_table)
+        data = @sharding.document.data
+        raise ArgumentError, "shard plan does not match the cache inputs" unless data["cache"] == cache_metadata
+
+        @sharding.validate_test_load_inputs!(data.fetch("identity")["test_load_inputs"])
+        @baseline = data.fetch("baseline")
+        validate_shard_baseline(cache, tests, probe_table)
+        @metrics["baseline_reused"] = true
+      end
+
+      def validate_shard_baseline(cache, tests, probe_table)
+        unless cache.valid?(@baseline) && @baseline["test_hashes"] == @cache.test_hashes
+          raise ArgumentError, "shard plan has an invalid baseline or test hashes"
+        end
+
+        registered = tests.to_h { |test| [test.fetch("id"), test.values_at("file", "line")] }
+        actual = @baseline.fetch("tests")
+        outcomes = @baseline["outcomes"]
+        unless outcomes.is_a?(Hash) && outcomes.keys.sort == registered.keys.sort &&
+               outcomes.values.all? { |status| %w[passed pending].include?(status) } &&
+               (registered.keys - actual.keys).all? { |id| outcomes[id] == "pending" } &&
+               actual.keys.any? { |id| outcomes[id] == "passed" }
+          raise ArgumentError, "shard plan requires complete test outcomes and at least one passing test"
+        end
+
+        probe = @baseline.fetch("probe")
+        variant_sites = probe_table.flat_map { |site, variants| variants.map { |variant| [variant, site] } }.to_h
+        reach = probe.fetch("reach")
+        infected = probe.fetch("infect").all? do |variant, ids|
+          variant_sites.key?(variant) && (ids - reach.fetch(variant_sites.fetch(variant), [])).empty?
+        end
+        load_reached = probe.fetch("load_reached")
+        unless actual.all? { |id, test| test.values_at("file", "line") == registered[id] } &&
+               (reach.keys - probe_table.keys).empty? && infected &&
+               (probe.fetch("samples").keys - probe_table.keys).empty? &&
+               (load_reached - @table.keys).empty? && (@shard_boot.fetch("load_reached") - load_reached).empty?
+          raise ArgumentError, "shard plan has invalid tests or probe observations"
+        end
       end
 
       def reach_baseline(adapter, probe_table, load_reached)
@@ -457,11 +682,11 @@ module Ripr
         nil
       end
 
-      def probe_baseline(adapter, probe_table, ids, allow_failure: false)
+      def probe_baseline(adapter, probe_table, ids, allow_failure: false, record_outcomes: false)
         run_baseline(allow_failure: allow_failure) do
           probe = Probe.new(probe_table, samples: @config[:samples])
           R.probe = probe
-          result = run_baseline_tests(adapter, ids)
+          result = run_baseline_tests(adapter, ids, record_outcomes:)
           result.merge("probe" => probe.snapshot)
         end
       end
@@ -475,10 +700,15 @@ module Ripr
         raise BaselineFailure, "baseline failed: #{messages.join('; ')}"
       end
 
-      def run_baseline_tests(adapter, test_ids)
-        return adapter.run(test_ids) unless @rails
-
-        @rails.with_worker(0) { adapter.run(test_ids) }
+      def run_baseline_tests(adapter, test_ids, record_outcomes: false)
+        run = if record_outcomes
+                -> { BaselineStability.capture { adapter.run(test_ids, record_outcomes: true) } }
+              elsif @sharding
+                -> { @sharding.capture_baseline { adapter.run(test_ids, record_outcomes: true) } }
+              else
+                -> { adapter.run(test_ids) }
+              end
+        @rails ? @rails.with_worker(0, &run) : run.call
       end
 
       def prepare_rails_workers(count, observer:)
