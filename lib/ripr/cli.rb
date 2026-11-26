@@ -122,6 +122,7 @@ module Ripr
 
       runner = Engine::Runner.new(config, @arguments, file_loading: @file_loading)
       return list_skipped(runner) if @list_skipped
+
       runner.plan
       results = if command == "list"
                   runner.mutants.map { |mutant| mutant.to_record.merge("status" => "planned") }
