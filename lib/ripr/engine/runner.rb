@@ -147,27 +147,32 @@ module Ripr
       end
 
       def prepare_call_graph
-        return unless @config[:call_graph_reuse] && !(@config[:boot] || @config[:rails] || @config[:static] || @config[:verify_killed])
+        return unless @config[:call_graph_reuse] && !(@config[:static] || @config[:verify_killed])
 
         require_relative "../core/call_graph"
-        @call_graph = Core::CallGraph.new(@sources)
+        @call_graph = Core::CallGraph.new(@sources, rails: @config[:rails])
       end
 
       def run_project(selection, &)
         probe_table = @table.slice(*selection.observed.map(&:site).uniq)
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        if @config[:boot] || @config[:rails]
+          require_relative "boot_context"
+          @boot_context = BootContext.new(boot: @config[:boot], rails: @config[:rails], source_paths: @sources.keys)
+        end
         with_project(probe: Probe.new(probe_table, samples: @config[:samples])) do |adapter|
           boot_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000
           load_reached = R.probe.snapshot.fetch("load_reached")
           R.probe = nil
           worker_config = @config.with_worker_limit { WorkerMemory.limit }
           @rails&.prepare_workers([worker_config[:jobs], selection.observed.length].min)
+          boot_digest = @boot_context&.fingerprint(sqlite_snapshots: @rails&.cache_snapshot_paths)
           @profile&.phase("boot", started)
           baseline_started = @profile&.now
           method_hashes = @mutants.to_h { |mutant| [mutant.full_id, mutant.method_hash] }
           @cache = ResultCache.new(@config, sources: @sources, test_files: @test_files, framework: @framework, method_hashes:,
                                             test_ids: adapter.tests.map { |test| test.fetch("id") }, probe_sites: probe_table.keys,
-                                            graph: @call_graph, load_dependencies: @load_dependencies)
+                                            graph: @call_graph, load_dependencies: @load_dependencies, boot_digest: boot_digest)
           Process.warmup
           prepare_baseline(adapter, probe_table, load_reached)
           @profile&.phase("baseline", baseline_started)
@@ -200,7 +205,7 @@ module Ripr
         if @config[:rails]
           require_relative "../integration/rails"
           @rails = Integration::Rails.new(boot: @config[:boot])
-          capture_load_output { @rails.prepare }
+          capture_load_output { observe_boot { @rails.prepare } }
         end
         reject_preloaded_sources
         @loader = Loader.new(@codes).install
@@ -211,18 +216,22 @@ module Ripr
           R.activate(site, @table.fetch(site).index(active.id) + 1)
         end
         if @rails
-          capture_load_output { @rails.boot }
+          capture_load_output { observe_boot { @rails.boot } }
         elsif (boot = @config[:boot])
           raise ArgumentError, "boot file does not exist: #{boot}" unless File.file?(boot)
 
-          capture_load_output { require File.expand_path(boot) }
+          capture_load_output { observe_boot { require File.expand_path(boot) } }
         end
-        yield load_tests
+        yield observe_boot { load_tests }
       ensure
         @loader&.uninstall
         @rails&.close
         R.reset
         previous_ripr.nil? ? ENV.delete("RIPR") : ENV["RIPR"] = previous_ripr
+      end
+
+      def observe_boot(&)
+        @boot_context ? @boot_context.observe(&) : yield
       end
 
       def reject_preloaded_sources
@@ -334,10 +343,11 @@ module Ripr
         klass = @framework == "rspec" ? Integration::RSpec : Integration::Minitest
         adapter = klass.new(files, seed: @config[:seed])
         capture_load_output do
-          if @call_graph
+          if @call_graph && !@boot_context
             _, @load_dependencies = @call_graph.trace { adapter.load }
           else
             adapter.load
+            @load_dependencies = [] if @boot_context
           end
         end
         raise BaselineFailure, "no tests were discovered" if adapter.tests.empty?
