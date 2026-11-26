@@ -90,6 +90,8 @@ For tools and coding agents, use `bundle exec ripr --since origin/main --reporte
 
 Use `--reporter agent-v2` for [the full diagnostic stages, method summaries, and weak-test ranking](schema/agent-v2.json). The text report and v2 both prioritize gaps by changed lines, absent covering tests, missed assertions, and public methods. Each condition adds one point. The v1 reporter remains available as `--reporter agent`.
 
+The published v2 schema is stable. Consumers should accept additional optional fields.
+
 Use `--profile` to write phase and worker timings in milliseconds, executed test counts, and cache hit rates to `.ripr/report/profile.json`. Diagnostic replays appear under `diagnosis`. Set `--report-dir` to change the destination. Interrupted workers have unknown test counts and are omitted from the tests-per-mutation average.
 
 Install the [bundled agent skill](skills/mutation-test-loop/SKILL.md) with `bundle exec ripr init-skill`. The default destination is `.claude/skills/mutation-test-loop`. Use `--dir` to choose another directory.

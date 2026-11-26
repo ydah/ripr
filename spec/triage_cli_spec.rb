@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "digest"
 require "fileutils"
 require "json"
 require "json_schemer"
@@ -9,20 +10,42 @@ require "tmpdir"
 
 RSpec.describe "agent diagnosis and triage" do
   let(:root) { File.expand_path("..", __dir__) }
+  let(:v2_schema_path) { File.join(root, "schema/agent-v2.json") }
 
   def agent_report(directory, *options)
-    flags = %w[--jobs 1 --reporter agent-v2] + options
+    flags = %w[--jobs 1 --reporter agent-v2 --reporter agent] + options
     output, error, status = Open3.capture3(RbConfig.ruby, File.join(root, "exe/ripr"), *flags, chdir: directory)
     expect(status).to be_success, error
-    report = JSON.parse(output)
-    schema = JSONSchemer.schema(Pathname.new(File.join(root, "schema/agent-v2.json")))
-    expect(schema.validate(report).to_a).to be_empty
-    report
+    reports = output.lines.map { |line| JSON.parse(line) }
+    expect(reports.map { |report| report.fetch("schema") }).to eq(%w[ripr.agent/v2 ripr.agent/v1])
+    reports.zip([v2_schema_path, File.join(root, "schema/agent-v1.json")]).each do |report, path|
+      schema = JSONSchemer.schema(Pathname.new(path))
+      expect(schema.validate(report).to_a).to be_empty
+    end
+    current, legacy = reports
+    stages = %w[not_propagated not_revealed]
+    summary = current.fetch("summary")
+    expected_summary = summary.except(*stages).merge("not_detected" => summary.fetch("not_detected") + summary.values_at(*stages).sum)
+    expect(legacy.fetch("summary")).to eq(expected_summary)
+    expected_gaps = current.fetch("gaps").to_h do |gap|
+      stage = gap.fetch("stage")
+      kind = stages.include?(stage) ? "not_detected" : stage
+      [gap.fetch("full_id"), [kind, *gap.values_at("suggested_inputs", "propagation")]]
+    end
+    legacy_gaps = legacy.fetch("gaps").to_h { |gap| [gap.fetch("full_id"), gap.values_at("kind", "suggested_inputs", "propagation")] }
+    expect(legacy_gaps).to eq(expected_gaps)
+    current
   end
 
   def git(directory, *arguments)
     _output, error, status = Open3.capture3("git", *arguments, chdir: directory)
     raise error unless status.success?
+  end
+
+  it "keeps the published agent v2 schema frozen" do
+    fingerprint = "1ee0b7050621532c606511a3ab4c8ff226d6cde97169a874ec09884ef191f038"
+    message = "Keep schema/agent-v2.json as published. Add a new schema version for contract changes."
+    expect(Digest::SHA256.file(v2_schema_path).hexdigest).to eq(fingerprint), message
   end
 
   it "ranks method gaps and weak tests with the native diagnostic stages" do
