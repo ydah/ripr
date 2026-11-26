@@ -243,6 +243,39 @@ if ENV["RIPR_TEST_RAILS"]
       expect(counts).to eq([2, 1, 1])
     end
 
+    it "reuses a sharded baseline with a matching Rails SQLite snapshot" do
+      counts, reports, original_database = run_fixture(<<~RUBY)
+        require "json"
+        require "open3"
+        require "rbconfig"
+
+        File.write(".gitignore", "/tmp/\n/log/\n/.ripr/\n")
+        system("git", "init", "-q", exception: true)
+        system("git", "-c", "maintenance.auto=false", "add", ".", exception: true)
+        system("git", "-c", "maintenance.auto=false", "-c", "user.name=Ripr Test", "-c", "user.email=test@example.test",
+               "commit", "-qm", "fixture", exception: true)
+
+        command = ->(args) do
+          output, error, status = Open3.capture3(RbConfig.ruby, #{File.expand_path('../exe/ripr', __dir__).dump},
+                                                *args, "--rails", "--operators", "comparison", "--jobs", "2")
+          raise error unless status.success?
+
+          output
+        end
+        command.call(%w[shard-plan 2])
+        plan = JSON.parse(File.read(".ripr/shard-plan.json"))
+        reports = (1..2).map do |index|
+          JSON.parse(command.call(["--shard", "\#{index}/2", "--reporter", "agent"]))
+        end
+        puts JSON.generate([plan.dig("report", "run", "metrics", "baseline_tests_run"), reports, File.exist?("test.sqlite3")])
+      RUBY
+
+      expect(counts).to eq(1)
+      expect(reports.map { |report| report.dig("run", "metrics", "baseline_tests_run") }).to eq([0, 0])
+      expect(reports.sum { |report| report.dig("summary", "killed") }).to eq(1)
+      expect(original_database).to be(false)
+    end
+
     if (postgresql_url = ENV.fetch("RIPR_TEST_POSTGRESQL", nil))
       it "clones disconnected PostgreSQL snapshots and falls back to the same captured data" do
         results = run_fixture(<<~'RUBY', url: postgresql_url)

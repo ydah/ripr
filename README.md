@@ -137,6 +137,17 @@ Use `bundle exec ripr list mutants --skipped` to see excluded mutation sites and
 
 ## CI
 
+Prepare a shard plan once, then pass `.ripr/shard-plan.json` to each shard job.
+
+```sh
+bundle exec ripr shard-plan 2 --no-samples
+bundle exec ripr --shard 1/2 --no-samples --report-dir .ripr/shard-1
+```
+
+Run the second shard with `--shard 2/2` and its own report directory. Use the same options, clean Git checkout, absolute project path, runtime, and test inputs for every job. Share plans from trusted runs. `--no-samples` keeps sampled application operands out of CI artifacts. Rails requires matching SQLite snapshots and uses one worker per shard. Collect each report directory's `shard.json` for aggregation.
+
+When `--include-tests-diff` finds changed tests, sharding selects all candidate mutations so it includes coverage removed by the edit.
+
 For a pull request workflow on GitHub Actions, fetch history for the merge base and install your project's bundle.
 
 ```yaml

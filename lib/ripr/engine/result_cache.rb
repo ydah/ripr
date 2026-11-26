@@ -9,10 +9,10 @@ require_relative "../core/reuse_planner"
 module Ripr
   module Engine
     class ResultCache
-      attr_reader :baseline_env_hash, :source_hash, :test_hashes, :previous, :graph
+      attr_reader :env_hash, :baseline_env_hash, :source_hash, :test_hashes, :previous, :graph
 
       def initialize(config, sources:, test_files:, framework:, method_hashes:, test_ids:, probe_sites:, graph: nil, load_dependencies: nil,
-                     boot_digest: nil)
+                     shared_baseline: false, boot_digest: nil)
         @config = config
         @method_hashes = method_hashes
         @snapshot = Snapshot.new
@@ -20,7 +20,7 @@ module Ripr
         booted = config[:boot] || config[:rails]
         cacheable = !booted || boot_digest
         @previous = config[:full] || !cacheable ? {} : @snapshot.read
-        @previous = {} if @repeated_baseline
+        @previous = {} if shared_baseline || @repeated_baseline
         @source_hash = digest(sources.sort.to_h.transform_values { |source| Digest::SHA256.hexdigest(source) })
         @test_hashes = test_files.sort.to_h { |path| [path, Digest::SHA256.file(path).hexdigest] }
         lockfiles = %w[Gemfile.lock .rspec .rspec-local]
@@ -36,7 +36,7 @@ module Ripr
         settings = config.to_h.slice(:operators, :arid_callees, :tests, :samples, :seed, :static)
         context = [VERSION, RUBY_ENGINE, RUBY_VERSION, RUBY_PLATFORM, Dir.pwd, Prism::VERSION, framework,
                    settings, dependencies, probe_sites.sort, ENV.fetch("RIPR_LOADER", nil), ENV.fetch("SPEC_OPTS", nil)]
-        context << boot_digest if booted
+        context << boot_digest if booted && !shared_baseline
         execution = [@test_hashes, test_ids.sort, config[:timeout], config[:jobs],
                      config[:verify_not_infected], config[:verify_killed], config[:call_graph_reuse], config[:typecheck]]
         @baseline_env_hash = digest([context, @source_hash])
