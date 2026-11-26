@@ -1,0 +1,59 @@
+name: Reach map transport
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/reach-map-transport.yml
+      - action.yml
+      - Gemfile
+      - ripr.gemspec
+      - lib/ripr/cli.rb
+      - lib/ripr/engine/reach_*.rb
+      - lib/ripr/engine/runner.rb
+      - lib/ripr/git.rb
+      - script/reach_map_action.sh
+      - script/reach_map_transport_smoke.sh
+      - test/fixtures/projects/minitest_basic/**
+
+permissions:
+  contents: read
+
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        with:
+          ruby-version: '4.0.9'
+          bundler-cache: true
+      - id: record
+        run: bash script/reach_map_transport_smoke.sh record
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.record.outputs.artifact-name }}
+          path: ${{ steps.record.outputs.artifact-path }}
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  replay:
+    needs: record
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        with:
+          ruby-version: '4.0.9'
+          bundler-cache: true
+      - name: Download and use the recorded map
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash script/reach_map_transport_smoke.sh use
