@@ -123,10 +123,13 @@ jobs: auto
 
 Use `bundle exec ripr --help` for CLI options and `bundle exec ripr list operators` for available mutations. CLI flags override file settings. Ignore `.ripr/` in Git. Use `--full` to bypass cached results, especially after changing external test data or environment variables.
 
+Use `bundle exec ripr list mutants --skipped` to see excluded mutation sites and their reasons without running tests.
+
 - `--jobs auto` uses the CPU count and caps it using available memory after boot on Linux and macOS. Pass `--jobs N` to use a fixed worker count.
 - `--operators full` adds string, regexp, collection, safe-navigation, compound assignment, and `case` mutations. `--full` controls the execution scope.
 - `--static` includes supported load-time mutations. ripr starts a fresh process with each mutation already active. A failure while loading the application is an execution error.
 - `--call-graph-reuse` can retain results across method-body edits if the current baseline observations and the previously executed dependencies still match. It reruns the baseline after a source change and falls back to ordinary invalidation when dependency tracking is incomplete.
+- `--boot` and `--rails` reuse cached results when observed startup inputs match. Rails can reuse results with isolated SQLite snapshots or with no database. External boot scripts, untracked startup operations, and server-backed databases require a fresh run.
 - `--typecheck sorbet` or `--typecheck rbs` checks mutations in a temporary copy using `srb tc` or `steep check`. Install the selected checker in the project bundle and make sure the original project passes its check.
 
 ## CI
@@ -161,7 +164,7 @@ Timeouts count as detected mutations. Errors remain in the score denominator. Ac
 
 ripr uses `fork` and CRuby's instruction-sequence loader. Start it before loading the source under test. Use `RIPR_LOADER=require` for the alternate loader, which rejects wrapped target `load` calls.
 
-By default, mutation sites are inside ordinary method definitions. `define_method` blocks, singleton receivers other than `self`, and detached heredoc interpolation are excluded. Operands of `defined?` stay intact. ripr instruments source in memory.
+By default, ripr instruments ordinary methods, `define_method` blocks, and class-body lambdas and procs in memory. This includes the lambda passed to a Rails scope. The skipped-site list reports unsupported singleton receivers, detached heredoc interpolation, and `defined?` operands.
 
 Use deterministic, independent tests. Shared state, time, and thread ordering can invalidate cached observations. If a mutation site runs outside a tracked test, ripr conservatively selects all tests. Use `--static` when the mutation must affect a value computed during loading. Ractor is outside the supported scope.
 

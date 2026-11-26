@@ -6,8 +6,8 @@ require "ripr/core/classifier"
 require "ripr/core/reuse_planner"
 
 RSpec.describe "Core source analysis" do
-  def analyze(source, operators: Ripr::Core::Operators::NAMES, arid_callees: %w[logger.* puts pp warn])
-    Ripr::Core::Analyzer.call(source, "lib/example.rb", operators: operators, arid_callees: arid_callees)
+  def analyze(source, operators: Ripr::Core::Operators::NAMES, arid_callees: %w[logger.* puts pp warn], skipped: nil)
+    Ripr::Core::Analyzer.call(source, "lib/example.rb", operators: operators, arid_callees: arid_callees, skipped: skipped)
   end
 
   def instrument(source, analysis = analyze(source))
@@ -15,11 +15,14 @@ RSpec.describe "Core source analysis" do
   end
 
   it "reports syntax errors without planning partial mutations" do
-    result = analyze("module Broken\n def value(\n")
+    skipped = []
+    result = analyze("module Broken\n def value(\n", skipped: skipped)
     expect(result.fetch(:sites)).to be_empty
     expect(result.fetch(:mutants)).to be_empty
     expect(result.fetch(:static)).to eq(0)
     expect(result.fetch(:warnings).join).to include("lib/example.rb")
+    expect(skipped).not_to be_empty
+    expect(skipped).to all(match(["lib/example.rb", a_kind_of(Integer), a_kind_of(Integer), a_string_starting_with("parse error: ")]))
   end
 
   it "leaves unevaluated defined? operands out of the runtime mutation plan" do
@@ -35,6 +38,67 @@ RSpec.describe "Core source analysis" do
       result = analyze("def calculate(a, b); a #{operator} b; end", operators: %w[comparison arithmetic])
       expect(result.fetch(:mutants).map { |mutant| mutant.values_at(:replacement, :mode) }).to eq([[replacement, "value"]])
     end
+  end
+
+  it "plans opt-in range, collection, predicate, and fetch mutations" do
+    source = <<~RUBY
+      def value(items, attributes, key, limit)
+        (1..limit)
+        (1...limit)
+        (..limit)
+        items.select(&:odd?)
+        items.reject { |item| item.odd? }
+        items.min
+        items.max
+        items.any?(&:odd?)
+        items.all?(&:odd?)
+        limit.positive?
+        limit.negative?
+        limit.zero?
+        items.present?
+        items.blank?
+        attributes . fetch(key)
+      end
+    RUBY
+    operators = %w[range_endpoint collection_query predicate_method fetch_index]
+    mutants = analyze(source, operators: operators).fetch(:mutants)
+    expect(mutants.map { |mutant| mutant.values_at(:operator, :mutated) }).to contain_exactly(
+      ["range_endpoint", "1...limit"], ["range_endpoint", "1..limit"], ["range_endpoint", "...limit"],
+      ["collection_query", "items.reject(&:odd?)"], ["collection_query", "items.select { |item| item.odd? }"],
+      ["collection_query", "items.max"], ["collection_query", "items.min"],
+      ["collection_query", "items.all?(&:odd?)"], ["collection_query", "items.any?(&:odd?)"],
+      ["predicate_method", "limit.negative?"], ["predicate_method", "limit.positive?"], ["predicate_method", "!(limit.zero?)"],
+      ["predicate_method", "items.blank?"], ["predicate_method", "items.present?"], ["fetch_index", "attributes[key]"]
+    )
+    expect(mutants.map { |mutant| mutant.fetch(:mode) }.uniq).to eq(["unknown"])
+    expect(analyze(source).fetch(:mutants).map { |mutant| mutant.fetch(:operator) } & operators).to be_empty
+  end
+
+  it "leaves flip-flops, patterns and nonmatching Ruby call shapes out of the opt-in operators" do
+    source = <<~RUBY
+      def value(items, attributes, key, limit, *arguments, **keywords, &block)
+        :inside if limit == 1..limit == 5
+        items in [1..5]
+        attributes.fetch(key: key)
+        attributes.fetch(**keywords)
+        attributes.fetch(*arguments)
+        attributes.fetch(key, :default)
+        attributes.fetch(key, &block)
+        attributes.fetch(key) { :default }
+        attributes.fetch key
+        attributes&.fetch(key)
+        fetch(key)
+        items.select(:column)
+        items.min(2)
+        items.any?(Integer)
+        items&.blank?
+        positive?(limit)
+        items.zero? { :callback }
+        items.present?(limit)
+      end
+    RUBY
+    operators = %w[range_endpoint collection_query predicate_method fetch_index]
+    expect(analyze(source, operators: operators).fetch(:mutants)).to be_empty
   end
 
   it "uses one arithmetic definition for matching, mutation and native array-copy probing" do
@@ -131,6 +195,11 @@ RSpec.describe "Core source analysis" do
     expect(result.fetch(:mutants).length).to eq(4)
   end
 
+  it "preserves redefinition identities when an earlier method has an empty body" do
+    result = analyze("class Example; def value; end; def value; 2; end; end", operators: ["integer_literal"])
+    expect(result.fetch(:mutants).map { |mutant| mutant.fetch(:subject) }.uniq).to eq(["Example#value[2]"])
+  end
+
   it "plans and directly rewrites all extended operator kinds and load-time literals" do
     source = <<~RUBY
       LIMIT = 3
@@ -140,7 +209,7 @@ RSpec.describe "Core source analysis" do
         count += 2
         case count
         when 3 then ["ready", /pattern/, {key: items&.first}, items.first]
-        else []
+        else [1..count, count.positive?, items.min, items.fetch(0)]
         end
       end
     RUBY
@@ -157,11 +226,68 @@ RSpec.describe "Core source analysis" do
     expect(instrument(source, analysis).fetch(:invalid)).to be_empty
   end
 
-  it "excludes dynamic method definitions and singleton receivers with diagnostics" do
+  it "plans dynamic method bodies and excludes unsupported singleton receivers" do
     source = "define_method(:value) { 1 }\nclass << object\n def value; 2; end\nend\ndef object.value; 3; end\n"
     result = analyze(source)
-    expect(result.fetch(:mutants)).to be_empty
-    expect(result.fetch(:warnings).join).to include("define_method", "singleton receiver")
+    expect(result.fetch(:mutants).map { |mutant| mutant.fetch(:subject) }.uniq).to eq(["Object#value<define_method>"])
+    expect(result.fetch(:warnings)).to contain_exactly("lib/example.rb:2: skipped unsupported singleton receiver",
+                                                       "lib/example.rb:5: skipped unsupported singleton receiver")
+  end
+
+  it "recognizes core deferred constructors and keeps unrelated call blocks in their enclosing context" do
+    source = <<~RUBY
+      class Example
+        define_method("limit") { 1 }
+        define_method(name) { 2 }
+        FIRST = Kernel.lambda { 3 }
+        SECOND = self.proc { 4 }
+        THIRD = ::Proc.new { 5 }
+        FOURTH = proc { 9 }
+        OTHER = object.lambda { 6 }
+        REGULAR = Builder.new { 7 }
+        def value
+          iterate { 8 }
+        end
+      end
+    RUBY
+    result = analyze(source, operators: ["integer_literal"])
+    expect(result.fetch(:mutants).map { |mutant| mutant.values_at(:subject, :original) }.uniq).to contain_exactly(
+      ["Example#limit<define_method>", "1"], ["Example#<define_method>", "2"], ["Example#<lambda>", "3"],
+      ["Example#<proc>", "4"], ["Example#<proc>[2]", "5"], ["Example#<proc>[3]", "9"], ["Example#value", "8"]
+    )
+  end
+
+  it "records only selected load-time operators and the reason for protected syntax" do
+    source = <<~RUBY
+      TOP = 1
+      if FLAG
+        OTHER = 2
+      end
+      def value(a)
+        puts(a)
+        return logger.warn(a)
+        defined?(a >= 3)
+        a
+      end
+      def object.unsupported; 4; end
+    RUBY
+    skipped = []
+    analyze(source, operators: %w[condition_negation statement_removal], skipped: skipped)
+    expect(skipped).to contain_exactly(
+      ["lib/example.rb", 2, 4, "load-time expression requires --static"],
+      ["lib/example.rb", 6, 3, "statement removal suppressed by arid_callees"],
+      ["lib/example.rb", 8, 12, "defined? operand requires its original syntax"],
+      ["lib/example.rb", 11, 1, "unsupported singleton receiver"]
+    )
+
+    skipped.clear
+    analyze(source, operators: ["integer_literal"], skipped: skipped)
+    expect(skipped).to contain_exactly(
+      ["lib/example.rb", 1, 7, "load-time expression requires --static"],
+      ["lib/example.rb", 3, 11, "load-time expression requires --static"],
+      ["lib/example.rb", 8, 12, "defined? operand requires its original syntax"],
+      ["lib/example.rb", 11, 1, "unsupported singleton receiver"]
+    )
   end
 
   it "keeps explicit and splatted calls out of binary operators" do
@@ -262,7 +388,13 @@ RSpec.describe "Core source analysis" do
   it "limits connector duplication to three boolean levels and excludes multiline connectors" do
     %w[&& ||].each do |connector|
       source = "def value(a,b,c,d,e,f); #{%w[a b c d e f].join(" #{connector} ")}; end"
-      expect(analyze(source, operators: ["boolean_connector"]).fetch(:sites).length).to eq(3)
+      skipped = []
+      expect(analyze(source, operators: ["boolean_connector"], skipped: skipped).fetch(:sites).length).to eq(3)
+      expect(skipped.length).to eq(2)
+      expect(skipped).to all(match(["lib/example.rb", 1, a_kind_of(Integer), "boolean connector exceeds the mutation depth limit"]))
+      skipped.clear
+      analyze(source, operators: ["arithmetic"], skipped: skipped)
+      expect(skipped).to be_empty
     end
     source = "def value(a,b); a &&\n b; end\n"
     expect(Prism.parse(source)).to be_success
@@ -332,10 +464,10 @@ RSpec.describe "Core source analysis" do
     expect(analyze(source).fetch(:mutants).map { |mutant| mutant.fetch(:subject) }.uniq).to eq(["Example#inner"])
   end
 
-  it "skips define_method blocks encountered inside an ordinary method" do
+  it "gives define_method blocks inside ordinary methods their own subjects" do
     result = analyze("def outer; define_method(:inner) { 1 }; end", operators: ["integer_literal"])
-    expect(result.fetch(:mutants)).to be_empty
-    expect(result.fetch(:warnings)).to eq(["lib/example.rb:1: skipped unsupported define_method block"])
+    expect(result.fetch(:mutants).map { |mutant| mutant.fetch(:subject) }.uniq).to eq(["Object#inner<define_method>"])
+    expect(result.fetch(:warnings)).to be_empty
   end
 
   it "plans removal of every non-final ordinary statement" do

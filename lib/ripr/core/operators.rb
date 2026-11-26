@@ -7,6 +7,9 @@ module Ripr
     module Operators
       EQUALITY = %w[== !=].freeze
       FINITE = Float.instance_method(:finite?)
+      PATTERNS = %i[match_predicate_node match_required_node in_node alternation_pattern_node array_pattern_node
+                    capture_pattern_node find_pattern_node hash_pattern_node].freeze
+      PREDICATES = { positive?: "negative?", negative?: "positive?", present?: "blank?", blank?: "present?" }.freeze
 
       Definition = Data.define(:node_types, :matcher, :variants, :mode, :infection_condition, :comparator, :instrument_template) do
         def variants_for(node, parent = nil)
@@ -133,6 +136,44 @@ module Ripr
         single_line?(node) && !node.block && node.call_operator_loc&.slice == "."
       end
 
+      def self.range_expression?(node, parent)
+        single_line?(node) && !PATTERNS.include?(parent&.type)
+      end
+
+      def self.range_variants(node)
+        [[node, nil, node.exclude_end? ? ".." : "...", node.operator_loc]]
+      end
+
+      def self.plain_call?(node)
+        single_line?(node) && node.call_operator_loc&.slice == "."
+      end
+
+      def self.collection_query?(node, _parent)
+        plain_call?(node) && !node.arguments
+      end
+
+      def self.predicate_call?(node, _parent)
+        collection_query?(node, nil) && !node.block
+      end
+
+      def self.predicate_variants(node)
+        return [[node, nil, "!(#{node.location.slice})", node.location]] if node.name == :zero?
+
+        replacement = PREDICATES[node.name]
+        replacement ? [[node, nil, replacement, node.message_loc]] : []
+      end
+
+      def self.fetch_index?(node, _parent)
+        return false unless node.name == :fetch && plain_call?(node) && node.opening_loc && !node.block
+
+        arguments = node.arguments&.arguments
+        arguments&.length == 1 && !%i[keyword_hash_node splat_node forwarding_arguments_node].include?(arguments.first.type)
+      end
+
+      def self.fetch_index_variants(node)
+        [[node, nil, "#{node.receiver.location.slice}[#{node.arguments.location.slice}]", node.location]]
+      end
+
       def self.safe_navigation?(node, _parent)
         single_line?(node) && !node.block && node.call_operator_loc&.slice == "&."
       end
@@ -181,6 +222,13 @@ module Ripr
           method(:collection_variants), nodes: %i[array_node hash_node], matcher: method(:collection_literal?)
         ),
         "collection_method" => definition({ first: "last", last: "first" }.freeze, nodes: [:call_node], matcher: method(:collection_call?)),
+        "range_endpoint" => definition(method(:range_variants), nodes: [:range_node], matcher: method(:range_expression?)),
+        "collection_query" => definition(
+          { select: "reject", reject: "select", min: "max", max: "min", any?: "all?", all?: "any?" }.freeze,
+          nodes: [:call_node], matcher: method(:collection_query?)
+        ),
+        "predicate_method" => definition(method(:predicate_variants), nodes: [:call_node], matcher: method(:predicate_call?)),
+        "fetch_index" => definition(method(:fetch_index_variants), nodes: [:call_node], matcher: method(:fetch_index?)),
         "safe_navigation" => definition(method(:safe_navigation_variants), nodes: [:call_node], matcher: method(:safe_navigation?)),
         "compound_assignment" => definition(
           method(:compound_variants), nodes: [:other], matcher: ->(node, _) { single_line?(node) && node.respond_to?(:binary_operator_loc) }
@@ -221,7 +269,9 @@ module Ripr
                            :connector?, :conditional?,
                            :condition_variants, :execution_expression?, :nil_variants, :single_line?, :string_literal?, :string_variants,
                            :regexp_literal?, :regexp_variants, :collection_literal?, :collection_variants, :collection_call?,
-                           :safe_navigation?, :safe_navigation_variants, :compound_variants, :case_variants
+                           :range_expression?, :range_variants, :plain_call?, :collection_query?, :predicate_call?, :predicate_variants,
+                           :fetch_index?, :fetch_index_variants, :safe_navigation?, :safe_navigation_variants, :compound_variants,
+                           :case_variants
     end
   end
 end

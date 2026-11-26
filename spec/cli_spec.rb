@@ -230,6 +230,42 @@ RSpec.describe "ripr command" do
     expect(stdout.lines.map(&:chomp)).to include("string_literal", "regexp_literal", "collection_literal", "safe_navigation")
   end
 
+  it "kills opt-in Ruby range, collection, predicate, and fetch mutations" do
+    Dir.mktmpdir("ripr-ruby-operators") do |directory|
+      FileUtils.mkdir_p(%w[lib test].map { |path| File.join(directory, path) })
+      File.write(File.join(directory, "lib/sample.rb"), <<~RUBY)
+        module Sample
+          def self.range; 0...3; end
+          def self.largest(values); values.max; end
+          def self.empty?(count); count.zero?; end
+          def self.required(values); values.fetch(:required); end
+        end
+      RUBY
+      File.write(File.join(directory, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+        class SampleTest < Minitest::Test
+          def test_ruby_operations
+            refute Sample.range.include?(3)
+            assert_equal 5, Sample.largest([2, 5])
+            assert Sample.empty?(0)
+            assert_raises(KeyError) { Sample.required({}) }
+          end
+        end
+      RUBY
+
+      operators = %w[range_endpoint collection_query predicate_method fetch_index]
+      stdout, stderr, status = command("--full", "--jobs", "1", "--operators", operators.join(","),
+                                       "--reporter", "agent", directory: directory)
+      expect(status.success?).to be(true), stderr
+      expect(JSON.parse(stdout).fetch("summary")).to include("killed" => operators.length, "survived" => 0, "error" => 0)
+      snapshot = JSON.parse(File.read(File.join(directory, ".ripr/snapshot.json")))
+      expect(snapshot.fetch("mutants").values.map { |mutant| mutant.values_at("operator", "status") }).to match_array(
+        operators.map { |operator| [operator, "killed"] }
+      )
+    end
+  end
+
   it "checks directly mutated source and excludes mutations rejected by a type checker" do
     Dir.mktmpdir("ripr-typed") do |dir|
       FileUtils.mkdir_p([File.join(dir, "lib"), File.join(dir, "test"), File.join(dir, "bin")])
