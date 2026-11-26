@@ -79,6 +79,25 @@ RSpec.describe Ripr::Engine::BootContext do
     end
   end
 
+  it "leaves scripts outside a loaded gem's Ruby require paths opaque" do
+    Dir.mktmpdir do |dependency|
+      dependency = File.realpath(dependency)
+      gem_spec = Gem::Specification.new("boot-dependency", "1.0.0")
+      gem_spec.full_gem_path = dependency
+      allow(Gem).to receive(:loaded_specs).and_return(Gem.loaded_specs.merge(gem_spec.name => gem_spec))
+
+      library = File.join(dependency, "lib", "boot_dependency.rb")
+      write(library, "true\n")
+      write("setup.rb", "load #{library.dump}\n")
+      expect(fingerprint).to match(/\A[a-f0-9]{64}\z/)
+
+      helper = File.join(dependency, "helper.rb")
+      write(helper, "true\n")
+      write("setup.rb", "load #{helper.dump}\n")
+      expect(fingerprint).to be_nil
+    end
+  end
+
   it "leaves dynamic processes, application time, randomness, and string evaluation opaque" do
     operations = ["system(RbConfig.ruby, '-e', 'exit 0')", "Time.now", "eval('true')",
                   "[1, 2].sample", "[1, 2].shuffle", "[1, 2].shuffle!"]
