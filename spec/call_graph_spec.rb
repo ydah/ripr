@@ -2,6 +2,7 @@
 
 require "ripr/core/call_graph"
 require "erb"
+require "fileutils"
 require "stringio"
 require "tmpdir"
 
@@ -24,6 +25,13 @@ RSpec.describe Ripr::Core::CallGraph do
 
   def graph(code)
     described_class.new(path => code)
+  end
+
+  def sourced_callback(root, path, code)
+    file = File.join(root, "lib", path)
+    FileUtils.mkdir_p(File.dirname(file))
+    File.write(file, code)
+    RubyVM::InstructionSequence.compile_file(file).eval
   end
 
   it "tracks transitive calls and invalidates only dependencies with changed method bodies" do
@@ -59,6 +67,13 @@ RSpec.describe Ripr::Core::CallGraph do
     current = graph(code)
     expect(graph(code.sub("1.to_s", "9.to_s")).structure_hash).not_to eq(current.structure_hash)
     expect(graph(code.sub("first = 2", "first = 200")).structure_hash).not_to eq(current.structure_hash)
+  end
+
+  it "includes class-body closures in the structure hash" do
+    code = "class Example; CALLBACK = -> { 7 }; HANDLER = proc { 8 }; end"
+    current = graph(code)
+    expect(graph(code.sub("7", "9")).structure_hash).not_to eq(current.structure_hash)
+    expect(graph(code.sub("8", "9")).structure_hash).not_to eq(current.structure_hash)
   end
 
   it "records dependencies when Ruby loads a configured source through its real path" do
@@ -164,9 +179,10 @@ RSpec.describe Ripr::Core::CallGraph do
     def object.of = 2
     def object.to_a = [3]
     def object.parse_file = 4
+    def object.spawn = 5
 
-    result, dependencies = graph(source).trace { [object.enable, object.of, object.to_a, object.parse_file] }
-    expect(result).to eq([1, 2, [3], 4])
+    result, dependencies = graph(source).trace { [object.enable, object.of, object.to_a, object.parse_file, object.spawn] }
+    expect(result).to eq([1, 2, [3], 4, 5])
     expect(dependencies).to eq([])
   end
 
@@ -206,6 +222,59 @@ RSpec.describe Ripr::Core::CallGraph do
     current = graph(source)
     expect(current.trace { Module.new.module_eval("1 + 1", __FILE__, __LINE__) }).to eq([2, nil])
     expect(current.trace { ERB.new("<%= 2 + 3 %>").result }).to eq(["5", nil])
+  end
+
+  it "refuses application reflection and external reads while tracing Rails tests" do
+    current = described_class.new({ path => source }, rails: true)
+    expect(current.trace { Module.new.module_eval("1 + 1", __FILE__, __LINE__) }).to eq([2, nil])
+    expect(current.trace { File.read(__FILE__) }.last).to be_nil
+  end
+
+  it "refuses thread-local changes to the active trace function" do
+    current = graph(source)
+    expect(current.trace { Thread.current.set_trace_func(nil) }.last).to be_nil
+    expect(current.trace { Thread.current.add_trace_func(proc {}) }.last).to be_nil
+  ensure
+    Thread.current.set_trace_func(nil)
+  end
+
+  it "recognizes only the audited Rails generator files and operations" do
+    Dir.mktmpdir do |directory|
+      package = File.join(directory, "activesupport")
+      suffix = "active_support/code_generator.rb"
+      evaluate = '-> { Module.new.module_eval("41 + 1") }'
+      generated = sourced_callback(package, suffix, evaluate)
+      unrelated = sourced_callback(directory, suffix, evaluate)
+      unlisted = sourced_callback(package, suffix, '-> { Module.new.class_eval("41 + 1") }')
+      specs = Gem.loaded_specs
+      rails = described_class.new({ path => source }, rails: true)
+      allow(Gem).to receive(:loaded_specs).and_return(specs.merge("activesupport" => double(full_gem_path: package)))
+
+      expect(rails.trace(&generated)).to eq([42, []])
+      expect(graph(source).trace(&generated)).to eq([42, nil])
+      expect(rails.trace(&unrelated)).to eq([42, nil])
+      expect(rails.trace(&unlisted)).to eq([42, nil])
+
+      allow(Gem).to receive(:loaded_specs).and_return(specs.except("activesupport"))
+      expect(rails.trace(&generated)).to eq([42, nil])
+    end
+  end
+
+  it "distinguishes Rails log writes and file sizing from reads" do
+    Dir.mktmpdir do |directory|
+      suffix = "logger/log_device.rb"
+      write = sourced_callback(directory, suffix, '->(stream) { [stream.stat.size, stream.write("data")] }')
+      read = sourced_callback(directory, suffix, "->(stream) { stream.read }")
+      rails = described_class.new({ path => source }, rails: true)
+      specs = Gem.loaded_specs.merge("logger" => double(full_gem_path: directory))
+      allow(Gem).to receive(:loaded_specs).and_return(specs)
+
+      File.open(File.join(directory, "test.log"), "w+b") do |stream|
+        expect(rails.trace { write.call(stream) }).to eq([[0, 4], []])
+        stream.rewind
+        expect(rails.trace { read.call(stream) }).to eq(["data", nil])
+      end
+    end
   end
 
   it "permits RSpec mocks to define their stubs" do
