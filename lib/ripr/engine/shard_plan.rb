@@ -13,7 +13,7 @@ module Ripr
       MAX_SHARDS = 1024
       MAX_BYTES = 64 * 1024 * 1024
       MUTATION_FIELDS = %w[id full_id site method_hash location subject operator original mutated replacement mode accepted
-                           static original_operator fixed_operands].freeze
+                           static original_operator fixed_operands branch_condition].freeze
       Document = Data.define(:data, :digest)
 
       attr_reader :index, :total, :document

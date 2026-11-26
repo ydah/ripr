@@ -58,7 +58,8 @@ module Ripr
         return unless exact || reusable_graph?(record, mutant, probe)
         return unless valid_record?(record)
 
-        result = record.merge(mutant).merge("reused" => true)
+        result = record.merge(mutant, "reused" => true)
+        result.delete("branch_condition") unless mutant.key?("branch_condition")
         if !exact && Core::Classifier::PROPAGATION.include?(result["status"])
           result.delete("propagation")
           result["status"] = "not_detected"
@@ -87,6 +88,7 @@ module Ripr
         results.each do |result|
           files = result.fetch("covering_tests", []).map { |test| test.fetch("file") }
           record = result.merge("env_hash" => @env_hash, "tests" => @test_hashes.slice(*files), "recorded_at" => Time.now.utc.iso8601)
+          record.delete("branch_condition")
           if @graph && result["dependency_hashes"]
             record["graph_context"] = @graph_context
             record["observation_hash"] = observation_hash(result, baseline.fetch("probe"))
