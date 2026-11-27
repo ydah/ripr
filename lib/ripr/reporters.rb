@@ -220,8 +220,9 @@ module Ripr
       proof = mutant.fetch("propagation")
       test = mutant.fetch("covering_tests").find { |entry| entry["id"] == proof.fetch("test_id") }
       location = test ? "#{test.fetch('file')}:#{test.fetch('line')}" : proof.fetch("test_id")
+      occurrence = proof["observation"] == "implicit_return" ? "implicit return" : "call"
       "#{mutant.fetch('subject')} #{describe_exit(proof.fetch('original'))} → " \
-        "#{describe_exit(proof.fetch('mutant'))} in #{location} (call #{proof.fetch('call')})."
+        "#{describe_exit(proof.fetch('mutant'))} in #{location} (#{occurrence} #{proof.fetch('call')})."
     end
 
     def self.describe_exit(exit)
@@ -230,6 +231,7 @@ module Ripr
       when "return"
         value = value[1] if value.is_a?(Array) && %w[TrueClass FalseClass NilClass Integer].include?(value.first)
         "returned #{JSON.generate(value)}"
+      when "return_type" then "returned an instance of #{value}"
       when "raise" then "raised #{value}"
       when "not_called" then "was not called"
       else "had an unknown exit"

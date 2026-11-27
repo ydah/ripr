@@ -12,19 +12,21 @@ require_relative "../lib/ripr/core/analyzer"
 require_relative "../lib/ripr/engine/child"
 
 module SelfMutateEngine
-  CACHE_TESTS = %w[spec/cache_cli_spec.rb spec/kill_order_spec.rb].freeze
+  CALL_GRAPH_REUSE_TEST = "spec/call_graph_reuse_cli_spec.rb"
+  CACHE_TESTS = ["spec/cache_cli_spec.rb", "spec/kill_order_spec.rb", CALL_GRAPH_REUSE_TEST].freeze
   CLI_TESTS = ["spec/cli_spec.rb"].freeze
   SUITES = {
-    "baseline_cache.rb" => CACHE_TESTS,
+    "baseline_cache.rb" => ["spec/baseline_cache_spec.rb", *CACHE_TESTS],
     "child.rb" => %w[spec/engine_spec.rb],
     "method_exits.rb" => %w[spec/method_exits_spec.rb spec/propagation_cli_spec.rb],
     "mutant.rb" => %w[spec/mutation_plan_spec.rb spec/cli_spec.rb],
     "profile.rb" => %w[spec/profile_spec.rb],
-    "result_cache.rb" => CACHE_TESTS,
-    "runner.rb" => %w[spec/cli_spec.rb spec/cache_cli_spec.rb spec/profile_spec.rb],
+    "result_cache.rb" => ["spec/result_cache_spec.rb", *CACHE_TESTS],
+    "runner.rb" => ["spec/mutation_plan_spec.rb", "spec/cli_spec.rb", "spec/cache_cli_spec.rb", CALL_GRAPH_REUSE_TEST,
+                    "spec/profile_spec.rb"],
     "runtime.rb" => %w[spec/runtime_spec.rb spec/instrumenter_spec.rb],
-    "scheduler.rb" => %w[spec/kill_order_spec.rb spec/cli_spec.rb spec/propagation_cli_spec.rb],
-    "static_run.rb" => CLI_TESTS,
+    "scheduler.rb" => ["spec/kill_order_spec.rb", CALL_GRAPH_REUSE_TEST, "spec/cli_spec.rb", "spec/propagation_cli_spec.rb"],
+    "static_run.rb" => ["spec/static_run_spec.rb", *CLI_TESTS],
     "type_checker.rb" => %w[spec/type_checker_spec.rb],
     "worker_memory.rb" => %w[spec/worker_memory_spec.rb]
   }.freeze
@@ -34,7 +36,7 @@ module SelfMutateEngine
 
   module_function
 
-  def run(root, jobs:, timeout_seconds:, only:)
+  def run(root, jobs:, timeout_seconds:, only:, shard: nil)
     configured_path = Bundler.settings[:path]
     bundle_path = File.expand_path(configured_path, root) if configured_path
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -43,22 +45,44 @@ module SelfMutateEngine
       FileUtils.mkdir_p(project)
       copy_project(root, project)
       analyses = analyze(project)
-      mutants = select_mutants(analyses.values.flat_map { |analysis| analysis.fetch(:mutants) }, only)
+      mutants = inventory(analyses, only)
+      mutants = shard_mutants(mutants, shard) if shard
       valid, invalid = mutants.partition { |mutant| !mutant[:invalid] }
-      raise ArgumentError, "No valid Engine or runtime mutants" if valid.empty?
+      raise ArgumentError, "No valid Engine or runtime mutants" if mutants.empty? || (!shard && valid.empty?)
 
       baselines = run_baselines(project, workspace, valid, jobs, timeout_seconds, bundle_path)
       warn "Engine/runtime original tests passed in #{baselines.size} suites"
       results = run_mutants(project, workspace, valid, analyses, jobs, timeout_seconds, bundle_path)
       results.concat(invalid.map { |mutant| outcome(mutant, "status" => "invalid") })
-      counts = STATUSES.to_h { |status| [status, results.count { |result| result.fetch("status") == status }] }
-      executed = results.count { |result| result.key?("seconds") }
-      score = (100.0 * counts.fetch("killed") / valid.size).round(1)
-      { "baselines" => baselines, "summary" => counts.merge("attempted" => valid.size, "executed" => executed, "score" => score),
-        "seconds" => (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round(3),
-        "warnings" => analyses.values.flat_map { |analysis| analysis.fetch(:warnings) },
-        "mutants" => results.sort_by { |result| result.fetch("full_id") } }
+      report(analyses, baselines, results, seconds: (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round(3))
     end
+  end
+
+  def merge_reports(root, paths, only:)
+    analyses = analyze(root)
+    expected = inventory(analyses, only).sort_by { |mutant| mutant.fetch(:full_id) }
+    reports = paths.map { |path| JSON.parse(File.read(path)) }
+    results = reports.flat_map { |shard| shard.fetch("mutants") }.sort_by { |result| result.fetch("full_id") }
+    matches = expected.size == results.size && expected.zip(results).all? do |mutant, result|
+      fields = outcome(mutant, {})
+      fields["location"] = fields.fetch("location").transform_keys(&:to_s)
+      status = result.fetch("status")
+      fields <= result && STATUSES.include?(status) && (mutant[:invalid] || false) == (status == "invalid")
+    end
+    raise ArgumentError, "Engine shard reports do not match the mutation inventory" unless matches
+
+    baselines = reports.reduce({}) { |merged, shard| merged.merge(shard.fetch("baselines")) }
+    report(analyses, baselines, results, seconds: reports.map { |shard| shard.fetch("seconds") }.max)
+  end
+
+  def report(analyses, baselines, results, seconds:)
+    counts = STATUSES.to_h { |status| [status, results.count { |result| result.fetch("status") == status }] }
+    attempted = results.size - counts.fetch("invalid")
+    executed = results.count { |result| result.key?("seconds") }
+    score = attempted.zero? ? 0.0 : (100.0 * counts.fetch("killed") / attempted).round(1)
+    { "baselines" => baselines, "summary" => counts.merge("attempted" => attempted, "executed" => executed, "score" => score),
+      "seconds" => seconds, "warnings" => analyses.values.flat_map { |analysis| analysis.fetch(:warnings) },
+      "mutants" => results.sort_by { |result| result.fetch("full_id") } }
   end
 
   def analyze(project)
@@ -68,13 +92,24 @@ module SelfMutateEngine
     end
   end
 
-  def select_mutants(mutants, only)
+  def inventory(analyses, only)
+    mutants = analyses.values.flat_map { |analysis| analysis.fetch(:mutants) }
     return mutants if only.empty?
 
     missing = only - mutants.flat_map { |mutant| mutant.values_at(:id, :full_id) }
     raise ArgumentError, "Unknown mutant IDs: #{missing.join(', ')}" unless missing.empty?
 
     mutants.select { |mutant| only.intersect?(mutant.values_at(:id, :full_id)) }
+  end
+
+  def shard_mutants(mutants, shard)
+    match = %r{\A([1-9]\d*)/([1-9]\d*)\z}.match(shard)
+    index, total = match.captures.map(&:to_i) if match
+    raise ArgumentError, "--shard must be INDEX/TOTAL with 1 <= INDEX <= TOTAL" unless match && index <= total
+
+    mutants.sort_by { |mutant| mutant.fetch(:full_id) }.each_with_index.filter_map do |mutant, position|
+      mutant if position % total == index - 1
+    end
   end
 
   def copy_project(from, to)
@@ -216,16 +251,30 @@ module SelfMutateEngine
 
   def main(arguments)
     options = { jobs: 4, timeout_seconds: 45, only: [] }
+    merge = false
     parser = OptionParser.new do |cli|
-      cli.banner = "Usage: ruby script/self_mutate_engine.rb [--jobs N] [--timeout-seconds N] [--only ID]"
+      cli.banner = <<~USAGE.chomp
+        Usage: ruby script/self_mutate_engine.rb [--jobs N] [--timeout-seconds N] [--only ID] [--shard INDEX/TOTAL]
+               ruby script/self_mutate_engine.rb [--only ID] --merge REPORT...
+      USAGE
       cli.on("--jobs N", Integer) { |number| options[:jobs] = number }
       cli.on("--timeout-seconds N", Integer) { |seconds| options[:timeout_seconds] = seconds }
       cli.on("--only ID") { |id| options[:only] << id }
+      cli.on("--shard INDEX/TOTAL") { |shard| options[:shard] = shard }
+      cli.on("--merge") { merge = true }
     end
     parser.parse!(arguments)
-    abort parser.to_s unless arguments.empty? && options.values_at(:jobs, :timeout_seconds).all?(&:positive?)
+    root = File.expand_path("..", __dir__)
 
-    puts JSON.pretty_generate(run(File.expand_path("..", __dir__), **options))
+    if merge
+      abort parser.to_s if arguments.empty? || options[:shard]
+
+      puts JSON.pretty_generate(merge_reports(root, arguments, only: options.fetch(:only)))
+    else
+      abort parser.to_s unless arguments.empty? && options.values_at(:jobs, :timeout_seconds).all?(&:positive?)
+
+      puts JSON.pretty_generate(run(root, **options))
+    end
   rescue ArgumentError, RuntimeError => e
     abort e.message
   end

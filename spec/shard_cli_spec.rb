@@ -159,6 +159,26 @@ RSpec.describe "ripr shared shard plan" do
     end
   end
 
+  it "validates shard counts and one-based slice coordinates" do
+    with_project do |directory|
+      %w[0 1025].each do |count|
+        _, error = command(directory, "shard-plan", count, exit_code: 1)
+        expect(error).to include("shard count must be between 1 and 1024")
+      end
+
+      command(directory, "shard-plan", "1024")
+      expect(json(directory, ".ripr/shard-plan.json").fetch("shards").size).to eq(1024)
+
+      ["", "1/1024/"].each do |slice|
+        _, error = command(directory, "--shard", slice, exit_code: 1)
+        expect(error).to include("--shard requires INDEX/TOTAL")
+      end
+      _, error = command(directory, "--shard", "1025/1024", exit_code: 1)
+      expect(error).to include("shard index cannot exceed the shard count")
+      expect(File.exist?(File.join(directory, ".ripr/report/shard.json"))).to be(false)
+    end
+  end
+
   it "includes formerly reached mutations after a test-only diff" do
     with_project do |directory|
       before = git(directory, "rev-parse", "HEAD")
@@ -198,6 +218,32 @@ RSpec.describe "ripr shared shard plan" do
       git(directory, "-c", "user.name=Ripr Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "-qm", "new revision")
       _, error = command(directory, "--shard", "1/2", exit_code: 1)
       expect(error).to include("does not match the checkout")
+    end
+  end
+
+  it "rejects malformed plan buckets, invalid dependency paths, and mismatched mutations" do
+    with_project do |directory|
+      command(directory, "shard-plan", "2")
+      path = File.join(directory, ".ripr/shard-plan.json")
+      plan = JSON.parse(File.binread(path))
+      invalid_buckets = [[], [plan.fetch("shards").first, plan.fetch("shards").last + [""]]]
+
+      invalid_buckets.each do |buckets|
+        File.write(path, JSON.generate(plan.merge("shards" => buckets)))
+        _, error = command(directory, "--shard", "1/2", exit_code: 1)
+        expect(error).to include("invalid shard plan")
+      end
+
+      identity = plan.fetch("identity")
+      relative_input = { "lib/subject.rb" => Digest::SHA256.file(File.join(directory, "lib/subject.rb")).hexdigest }
+      File.write(path, JSON.generate(plan.merge("identity" => identity.merge("test_load_inputs" => relative_input))))
+      _, error = command(directory, "--shard", "1/2", exit_code: 1)
+      expect(error).to include("shard plan has invalid test load inputs")
+
+      File.write(path, JSON.generate(plan.merge("identity" => identity.merge("mutation_fingerprints" => {}))))
+      _, error = command(directory, "--shard", "1/2", exit_code: 1)
+      expect(error).to include("shard plan does not match the selected mutations")
+      expect(File.exist?(File.join(directory, ".ripr/report/shard.json"))).to be(false)
     end
   end
 

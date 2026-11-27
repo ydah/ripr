@@ -14,6 +14,7 @@ require_relative "result_cache"
 require_relative "scheduler"
 require_relative "static_run"
 require_relative "worker_memory"
+require "digest"
 require "pathname"
 require "tempfile"
 
@@ -53,16 +54,8 @@ module Ripr
         return @mutants if @planned
 
         started = @profile&.now
-        patterns = if @paths.empty?
-                     @config[:include]
-                   else
-                     @paths.map { |p| File.directory?(p) ? "#{p}/**/*.rb" : p }
-                   end
-        files = patterns.flat_map { |pattern| Dir.glob(pattern) }.uniq.sort.select { |p| File.file?(p) && p.end_with?(".rb") }
-        files.map! { |path| relative(path) }
-        files.uniq!
-        files.reject! { |path| @config[:exclude].any? { |pattern| File.fnmatch?(pattern, path, File::FNM_PATHNAME) } }
-        files.each do |path|
+        @plan_root = Dir.pwd
+        source_paths.each do |path|
           analysis = Core::Analyzer.call(
             File.binread(path), path,
             operators: @config[:operators], arid_callees: @config[:arid_callees], static: @config[:static], skipped: skipped
@@ -128,12 +121,20 @@ module Ripr
         run_sharding(select_mutants, index: nil, total: ShardPlan.total(count))
       end
 
-      def run_static(full_id, test_ids)
-        plan
-        mutant = @mutants.find { |entry| entry.full_id == full_id && entry.static } if full_id
-        raise ArgumentError, "static mutation changed before execution: #{full_id}" if full_id && !mutant
+      def run_static(full_id, test_ids, prepared: nil)
+        if restore_static_plan(prepared, full_id)
+          AcceptLedger.new.read
+          active = prepared.fetch("activations")[full_id]
+        else
+          plan
+          if full_id
+            mutant = @mutants.find { |entry| entry.full_id == full_id && entry.static }
+            raise ArgumentError, "static mutation changed before execution: #{full_id}" unless mutant
 
-        with_project(active: mutant) { |adapter| capture_load_output { adapter.run(test_ids, fail_fast: true) } }
+            active = static_activation(mutant)
+          end
+        end
+        with_project(active: active) { |adapter| capture_load_output { adapter.run(test_ids, fail_fast: true) } }
       end
 
       def record_reach_map
@@ -166,6 +167,49 @@ module Ripr
       end
 
       private
+
+      def source_paths
+        patterns = if @paths.empty?
+                     @config[:include]
+                   else
+                     @paths.map { |p| File.directory?(p) ? "#{p}/**/*.rb" : p }
+                   end
+        files = patterns.flat_map { |pattern| Dir.glob(pattern) }.uniq.sort.select { |p| File.file?(p) && p.end_with?(".rb") }
+        files.map! { |path| relative(path) }
+        files.uniq!
+        files.reject { |path| @config[:exclude].any? { |pattern| File.fnmatch?(pattern, path, File::FNM_PATHNAME) } }
+      end
+
+      def static_plan
+        {
+          root: @plan_root,
+          sources: @sources.transform_values { |source| Digest::SHA256.hexdigest(source) },
+          codes: @codes.transform_values { |code| [code.encoding.name, [code].pack("m0")] },
+          table: @table,
+          activations: @mutants.each_with_object({}) do |mutant, activations|
+            activations[mutant.full_id] ||= static_activation(mutant) if mutant.static && !mutant.invalid
+          end
+        }
+      end
+
+      def restore_static_plan(prepared, full_id)
+        return unless prepared.is_a?(Hash) && prepared["root"] == Dir.pwd
+        return if full_id && !prepared.fetch("activations").key?(full_id)
+
+        sources = prepared.fetch("sources")
+        return unless source_paths == sources.keys && sources.all? { |path, digest| Digest::SHA256.file(path).hexdigest == digest }
+
+        codes = prepared.fetch("codes").transform_values { |encoding, bytes| bytes.unpack1("m0").force_encoding(encoding) }
+        @table = prepared.fetch("table")
+        @codes = codes
+        true
+      rescue KeyError, TypeError, ArgumentError, SystemCallError, IOError
+        false
+      end
+
+      def static_activation(mutant)
+        [mutant.site, @table.fetch(mutant.site).index(mutant.id) + 1]
+      end
 
       def collect_skipped_mutants(skipped)
         @mutants.each do |mutant|
@@ -306,7 +350,7 @@ module Ripr
         started = @profile&.now
         selected = selection.selected
         selected |= select_test_mutants(selection.candidates, selection.changed_tests) unless selection.changed_tests.empty?
-        static_run = StaticRun.new(worker_config, @paths, boot_ms: boot_ms)
+        static_run = StaticRun.new(worker_config, @paths, boot_ms: boot_ms, &method(:static_plan))
         scheduler = Scheduler.new(worker_config, @baseline, @table, @cache, targets: method(:method_targets), warnings: @warnings,
                                                                             metrics: @metrics, rails: @rails,
                                                                             static_run: static_run, profile: @profile)
@@ -370,10 +414,7 @@ module Ripr
         @loader = Loader.new(@codes).install
         R.configure(@table, samples: @config[:samples])
         R.probe = probe
-        if active
-          site = active.site
-          R.activate(site, @table.fetch(site).index(active.id) + 1)
-        end
+        R.activate(*active) if active
         if @rails
           capture_load_output { observe_boot { @rails.boot } }
         elsif (boot = @config[:boot])
