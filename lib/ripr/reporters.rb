@@ -45,7 +45,8 @@ module Ripr
         hint += " Observed operands: #{JSON.generate(observed)}." if status == "not_infected" && !observed.empty?
         suggestion = Core::InputSuggestions.for(mutant)
         hint += " #{suggestion_message(suggestion)}" if suggestion
-        hint += " #{comparison_message(mutant)}" if mutant["comparison_inputs"]
+        comparison = mutant["comparison_inputs"] if triage
+        hint += " #{comparison_message(mutant)}" if comparison
         hint += " #{load_note(mutant)}" if mutant["load_reached"]
         flags = ""
         flags += " --rails" if config && config[:rails]
@@ -61,7 +62,7 @@ module Ripr
           gap["stage"] = status
           gap["priority"] = triage.priorities.fetch(mutant.fetch("full_id"))
           gap["equivalence_suspected"] = true if equivalence
-          gap["comparison_inputs"] = mutant["comparison_inputs"] if mutant["comparison_inputs"]
+          gap["comparison_inputs"] = comparison if comparison
         else
           gap["kind"] = kind
           gap["stage"] = status if diagnosed
@@ -213,7 +214,7 @@ module Ripr
       inputs = mutant.fetch("comparison_inputs")
       subject = mutant.fetch("subject")
       sign = Value::VALUE_COMPARATORS.fetch(Integer).fetch(:<=>).bind_call(*inputs.fetch("values"))
-      "Use fixture instances for #{subject}: use values #{JSON.generate(inputs.fetch('values'))} for " \
+      "Use fixture instances for #{subject} with values #{JSON.generate(inputs.fetch('values'))} for " \
         "#{inputs.fetch('left')} <=> #{inputs.fetch('right')} and make #{inputs.fetch('zero_comparisons').join(' and ')} return zero. " \
         "Assert (left <=> right) == #{sign} and (right <=> left) == #{-sign}. " \
         "Field values were sampled independently in #{subject.delete_suffix('#<=>')}#==."

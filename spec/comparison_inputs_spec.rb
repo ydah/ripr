@@ -158,6 +158,9 @@ RSpec.describe "comparison chain inputs" do
                     .map { |gap| gap.fetch("id") })
         .to eq(gaps.map { |gap| gap.fetch("id") })
       expect(reports.last.fetch("gaps").flat_map(&:keys)).not_to include("comparison_inputs", "suggested_inputs")
+      legacy = JSON.parse(run_report(directory, "--reporter", "agent"))
+      comparison_gaps = ->(report) { report.fetch("gaps").select { |gap| gap.fetch("subject") == "Sample#<=>" } }
+      expect(comparison_gaps.call(reports.last)).to eq(comparison_gaps.call(legacy))
       reports.zip(%w[agent-v2 agent-v1]).each do |report, name|
         schema = JSONSchemer.schema(Pathname.new(File.expand_path("../schema/#{name}.json", __dir__)))
         expect(schema.validate(report).to_a).to be_empty
