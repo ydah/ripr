@@ -123,7 +123,7 @@ RSpec.describe "ripr reach-map" do
       _, error, status = capture(directory)
       expect(status.exitstatus).to eq(0), error
       map = JSON.parse(File.read(artifact(directory)))
-      expect(map.fetch("unresolved_files")).to eq(["lib/sample.rb"])
+      expect(map).to include("opaque_load" => true, "unresolved_files" => ["lib/sample.rb"])
       expect(map.fetch("deferred_methods").map { |key| key.split(":").last }).to eq(["deferred"])
     end
   end

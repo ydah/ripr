@@ -14,6 +14,7 @@ module Ripr
       AMBIGUOUS_EXIT = ["ambiguous_exit"].freeze
       NOT_CALLED = ["not_called"].freeze
       UNKNOWN_EXIT = ["unknown"].freeze
+      TRUNCATED_EXIT = ["truncated"].freeze
       EXCEPTION_NAMES = [ArgumentError, EOFError, EncodingError, Exception, FiberError, FloatDomainError,
                          FrozenError, IndexError, IOError, KeyError, LoadError, LocalJumpError, NameError,
                          NoMethodError, NotImplementedError, RangeError, RuntimeError, ScriptError, StandardError,
@@ -36,7 +37,7 @@ module Ripr
       UNBIND = Method.instance_method(:unbind)
       PUBLIC_METHOD = Module.instance_method(:public_method_defined?)
 
-      Subject = Struct.new(:target, :calls, :call_count, :iseq)
+      Subject = Struct.new(:target, :calls, :call_count, :iseq, :stopped)
       Frame = Struct.new(:subject, :test, :calls, :index, :ambient_exception, :raised)
       Raised = Struct.new(:exception, :exits)
       private_constant :Subject, :Frame, :Raised
@@ -105,10 +106,13 @@ module Ripr
       end
 
       def self.stable(first, second)
-        first.select do |subject, calls|
-          calls && !calls.empty? && calls == second[subject] && calls.values.all? do |observations|
-            observations.all? { |exit| exit && exit != AMBIGUOUS_EXIT }
+        first.each_with_object({}) do |(subject, calls), stable|
+          next unless calls && second[subject]
+
+          retained = calls.select do |test, observations|
+            !observations.empty? && observations == second[subject][test] && observations.all? { |exit| exit && exit != AMBIGUOUS_EXIT }
           end
+          stable[subject] = retained.freeze unless retained.empty?
         end.freeze
       end
 
@@ -124,7 +128,11 @@ module Ripr
             next
           end
 
-          shared_calls = [before.size, after.size].min
+          before_truncated = before.last == TRUNCATED_EXIT
+          after_truncated = after.last == TRUNCATED_EXIT
+          before_count = before.size - (before_truncated ? 1 : 0)
+          after_count = after.size - (after_truncated ? 1 : 0)
+          shared_calls = [before_count, after_count].min
           shared_calls.times do |index|
             a = before[index]
             b = after[index]
@@ -133,6 +141,10 @@ module Ripr
             else
               comparable = false
             end
+          end
+          if before_truncated || after_truncated
+            comparable = false
+            next
           end
           next if before.size == after.size
 
@@ -186,6 +198,8 @@ module Ripr
           next unless event.method_id == name && Value::IDENTITY.bind_call(event.defined_class, owner)
 
           @mutex.synchronize do
+            next if subject.stopped
+
             if event.event == :call
               enter(subject)
             else
@@ -220,14 +234,19 @@ module Ripr
         return unless subject.calls
 
         test = R.current_test
-        if !test || @calls_remaining.zero? || subject.call_count >= MAX_CALLS_PER_SUBJECT
+        unless test
           invalidate(subject)
+          return
+        end
+
+        if @calls_remaining.zero? || subject.call_count >= MAX_CALLS_PER_SUBJECT
+          invalidate(subject, test)
           return
         end
 
         calls = (subject.calls[test] ||= [])
         if calls.size >= MAX_CALLS_PER_TEST
-          invalidate(subject)
+          invalidate(subject, test)
           return
         end
 
@@ -259,12 +278,21 @@ module Ripr
         end
       end
 
-      def invalidate(subject)
-        subject.calls = nil
+      def invalidate(subject, test = nil)
+        subject.calls = nil unless test
+        subject.stopped = true if test
         @frames.delete_if do |_fiber, frames|
-          frames.reject! { |frame| Value::IDENTITY.bind_call(frame.subject, subject) }
+          frames.reject! do |frame|
+            next false unless Value::IDENTITY.bind_call(frame.subject, subject)
+
+            subject.calls&.delete(frame.test)
+            true
+          end
           frames.empty?
         end
+        prefix = subject.calls&.fetch(test, nil)
+        prefix << TRUNCATED_EXIT if prefix && !prefix.empty?
+        subject.calls = nil if subject.calls && subject.calls.empty?
       end
 
       def observe_exception(event)

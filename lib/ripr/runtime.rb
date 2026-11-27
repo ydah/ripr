@@ -414,6 +414,7 @@ module Ripr
         @active_site = nil
         @active_variant = 0
         @probe = nil
+        @return_observer = nil
         self.current_test = nil
       end
 
@@ -428,6 +429,14 @@ module Ripr
       def activate(site, variant)
         @active_site = site
         @active_variant = variant
+      end
+
+      def with_return_observer(observer)
+        previous = @return_observer
+        @return_observer = observer
+        yield
+      ensure
+        @return_observer = previous
       end
 
       def bin(site, left, right, pure = true, array_copy = false) # rubocop:disable Style/OptionalBooleanParameter
@@ -458,7 +467,9 @@ module Ripr
 
       def ret(site, value)
         @probe&.observe_ret(site, value)
-        site == @active_site ? nil : value
+        result = site == @active_site ? nil : value
+        @return_observer&.call(site, result)
+        result
       end
 
       def on?(site)

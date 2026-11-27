@@ -80,6 +80,25 @@ RSpec.describe "mutation execution" do
     end
   end
 
+  it "stops a timed-out worker after its test joins another process group" do
+    parent_group = Process.getpgrp
+    Dir.mktmpdir do |directory|
+      worker_pid = File.join(directory, "worker.pid")
+      finished = File.join(directory, "finished")
+      result = Ripr::Engine::Child.call(timeout_ms: 500) do
+        Process.setpgid(0, parent_group)
+        File.write(worker_pid, Process.pid.to_s)
+        sleep 2
+        File.write(finished, "finished")
+        { "success" => true }
+      end
+
+      expect(result).to eq("status" => "timeout")
+      expect(File.exist?(finished)).to be(false)
+      expect { Process.waitpid(Integer(File.read(worker_pid))) }.to raise_error(Errno::ECHILD)
+    end
+  end
+
   it "reports why a worker failed to return an object" do
     abrupt = Ripr::Engine::Child.call(timeout_ms: 1000) { exit! 9 }
     array = Ripr::Engine::Child.call(timeout_ms: 1000) { [1, 2] }

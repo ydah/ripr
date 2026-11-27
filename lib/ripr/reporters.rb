@@ -38,7 +38,8 @@ module Ripr
 
         id = mutant.fetch("id")
         equivalence = equivalence_hint(mutant) if triage
-        hint = equivalence || HINTS.fetch(status)
+        condition = branch_condition(mutant) if triage
+        hint = condition ? branch_hint(condition) : equivalence || HINTS.fetch(status)
         observed = mutant.fetch("observed", [])
         hint += " Observed operands: #{JSON.generate(observed)}." if status == "not_infected" && !observed.empty?
         suggestion = Core::InputSuggestions.for(mutant)
@@ -64,6 +65,7 @@ module Ripr
         end
         gap["propagation"] = mutant.fetch("propagation") if mutant.key?("propagation")
         gap["suggested_inputs"] = suggestion.fetch(:inputs) if suggestion
+        gap["branch_condition"] = condition if condition
         gap
       end
       if triage
@@ -84,6 +86,9 @@ module Ripr
           suggestion = Core::InputSuggestions.for(mutant)
           reason += ". #{suggestion_message(suggestion)}" if suggestion
           reason += ". #{propagation_message(mutant)}" if mutant["propagation"]
+          if (condition = branch_condition(mutant))
+            reason += ". #{branch_hint(condition)}"
+          end
           equivalence = equivalence_hint(mutant)
           reason += ". #{equivalence}" if equivalence
           reason += ". #{load_note(mutant)}" if mutant["load_reached"]
@@ -169,6 +174,9 @@ module Ripr
                   "#{mutant['original'].inspect} → #{mutant['mutated'].inspect} id=#{mutant['id']}"
       stdout.puts "  observed: #{JSON.generate(mutant['observed'])}" unless mutant.fetch("observed", []).empty?
       stdout.puts "  #{propagation_message(mutant)}" if mutant["propagation"]
+      if (condition = branch_condition(mutant))
+        stdout.puts "  #{branch_hint(condition)}"
+      end
       equivalence = equivalence_hint(mutant)
       stdout.puts "  #{equivalence}" if equivalence
       if (suggestion = Core::InputSuggestions.for(mutant))
@@ -185,6 +193,14 @@ module Ripr
 
     def self.load_note(mutant)
       mutant["static"] ? STATIC_NOTE : LOAD_NOTE
+    end
+
+    def self.branch_condition(mutant)
+      mutant["branch_condition"] if mutant.fetch("status") == "not_reached"
+    end
+
+    def self.branch_hint(condition)
+      "To reach this branch, #{condition.fetch('expression')} must match #{condition.fetch('patterns').join(' or ')} after earlier clauses."
     end
 
     def self.suggestion_message(suggestion)
@@ -204,8 +220,9 @@ module Ripr
       proof = mutant.fetch("propagation")
       test = mutant.fetch("covering_tests").find { |entry| entry["id"] == proof.fetch("test_id") }
       location = test ? "#{test.fetch('file')}:#{test.fetch('line')}" : proof.fetch("test_id")
+      occurrence = proof["observation"] == "implicit_return" ? "implicit return" : "call"
       "#{mutant.fetch('subject')} #{describe_exit(proof.fetch('original'))} → " \
-        "#{describe_exit(proof.fetch('mutant'))} in #{location} (call #{proof.fetch('call')})."
+        "#{describe_exit(proof.fetch('mutant'))} in #{location} (#{occurrence} #{proof.fetch('call')})."
     end
 
     def self.describe_exit(exit)
@@ -214,6 +231,7 @@ module Ripr
       when "return"
         value = value[1] if value.is_a?(Array) && %w[TrueClass FalseClass NilClass Integer].include?(value.first)
         "returned #{JSON.generate(value)}"
+      when "return_type" then "returned an instance of #{value}"
       when "raise" then "raised #{value}"
       when "not_called" then "was not called"
       else "had an unknown exit"
