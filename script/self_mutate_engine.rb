@@ -16,6 +16,8 @@ module SelfMutateEngine
   CACHE_TESTS = ["spec/cache_cli_spec.rb", "spec/kill_order_spec.rb", CALL_GRAPH_REUSE_TEST].freeze
   CLI_TESTS = ["spec/cli_spec.rb"].freeze
   RUNNER_REACH_METHODS = %w[record_reach_map reach_baseline prepare_test_file_loading prepare_reach_selection].freeze
+  RUNNER_SHARD_METHODS = %w[record_shard_plan run_sharding empty_baseline write_shard_plan cache_metadata
+                            use_shard_baseline validate_shard_baseline].freeze
   SUITES = {
     "baseline_cache.rb" => ["spec/baseline_cache_spec.rb", *CACHE_TESTS],
     "baseline_stability.rb" => %w[spec/baseline_stability_cli_spec.rb],
@@ -135,6 +137,7 @@ module SelfMutateEngine
     file = File.basename(mutant.fetch(:location).fetch(:file))
     method = mutant.fetch(:subject).delete_prefix("Ripr::Engine::Runner#")
     return SUITES.fetch("reach_map.rb") if file == "runner.rb" && RUNNER_REACH_METHODS.include?(method)
+    return SUITES.fetch("shard_plan.rb") if file == "runner.rb" && RUNNER_SHARD_METHODS.include?(method)
 
     SUITES.fetch(file) { ["spec/engine_spec.rb", *CLI_TESTS] }
   end
