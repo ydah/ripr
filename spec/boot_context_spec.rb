@@ -103,6 +103,8 @@ RSpec.describe Ripr::Engine::BootContext do
 
       expect(fingerprint).to be_nil
     end
+  end
+
   it "tracks file sizes and directory entries consumed outside the project input globs" do
     write("setup.rb", "Dir.children('state')\nFile.size('state/settings')\n")
     write("state/settings", "first\n")
