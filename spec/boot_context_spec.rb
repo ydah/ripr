@@ -80,6 +80,31 @@ RSpec.describe Ripr::Engine::BootContext do
     end
   end
 
+  it "tracks directory entries returned to the boot script by glob and bracket queries" do
+    Dir.mktmpdir do |external|
+      pattern = File.join(external, "*.yml")
+      %i[glob []].each do |query|
+        write("setup.rb", "Dir.#{query}(#{pattern.dump})\n")
+        initial = fingerprint
+        expect(initial).to match(/\A[a-f0-9]{64}\z/)
+        expect(fingerprint).to eq(initial)
+
+        added = File.join(external, "#{query}.yml")
+        File.write(added, "enabled: true\n")
+        expect(fingerprint).not_to eq(initial)
+      end
+    end
+  end
+
+  ["|entry| entry", "break true", "break []"].each do |body|
+    it "treats a boot glob with #{body.inspect} as opaque" do
+      write("external/settings.yml", "enabled: true\n")
+      write("setup.rb", "Dir.glob('external/*.yml') { #{body} }\n")
+
+      expect(fingerprint).to be_nil
+    end
+  end
+
   it "tracks file sizes and directory entries consumed outside the project input globs" do
     write("setup.rb", "Dir.children('state')\nFile.size('state/settings')\n")
     write("state/settings", "first\n")
