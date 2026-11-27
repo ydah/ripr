@@ -52,6 +52,25 @@ RSpec.describe "mutation execution" do
     expect(result.fetch("value").size).to eq(200_000)
   end
 
+  it "drains unread results from an exited worker" do
+    reader = worker_pid = nil
+    allow(IO).to receive(:select).and_wrap_original do |select, readers, *arguments|
+      reader = readers.fetch(0)
+      select.call(readers, *arguments)
+      nil
+    end
+    allow(Process).to receive(:waitpid2).and_wrap_original do |wait, pid, flags|
+      worker_pid = pid
+      wait.call(pid, flags)
+    end
+
+    result = Ripr::Engine::Child.call(timeout_ms: 1000) { { "answer" => 42 } }
+
+    expect(result).to eq("answer" => 42)
+    expect(reader).to be_closed
+    expect { Process.waitpid(worker_pid) }.to raise_error(Errno::ECHILD)
+  end
+
   it "assigns each concurrent worker a distinct database slot and reuses slots for pending tasks" do
     tasks = [1, 2, 3, 4].freeze
     result = Ripr::Engine::Child.batch(tasks, jobs: 2, timeout: ->(_) { 1000 }) do |_task, slot|
