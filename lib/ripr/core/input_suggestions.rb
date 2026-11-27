@@ -25,7 +25,7 @@ module Ripr
         right_step = 1
         if %w[+ -].include?(original) && !samples.empty? && samples.all? { |pair| pair.all? { |value| Value::CLASS_OF.bind_call(value) == Integer } }
           right_step = right_multiplier(mutant["original"], original) || 1
-          return if right_step == 0
+          return if Value::INTEGER_EQ.bind_call(right_step, 0)
         end
         inputs = samples.filter_map do |sample|
           candidates(*sample, original, right_step).find do |pair|
