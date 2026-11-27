@@ -89,6 +89,56 @@ RSpec.describe "agent diagnosis and triage" do
     end
   end
 
+  it "shows literal case inputs for gaps in untested branch bodies" do
+    Dir.mktmpdir("ripr-case-input") do |directory|
+      FileUtils.mkdir_p(%w[lib test].map { |path| File.join(directory, path) })
+      File.write(File.join(directory, "lib/sample.rb"), <<~RUBY)
+        module Sample
+          def self.amount(options)
+            case options.fetch(:kind)
+            when "used"
+              0
+            when "tail", :finished, 81
+              123
+            when "mixed", extra_kind
+              456
+            end
+          end
+
+          def self.extra_kind = :extra
+
+          def self.heredoc_amount
+            case String(<<~KIND)
+              example
+            KIND
+            when "tail"
+              789
+            end
+          end
+        end
+      RUBY
+      File.write(File.join(directory, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+
+        class SampleTest < Minitest::Test
+          def test_used
+            assert_equal 0, Sample.amount({ kind: "used" })
+          end
+        end
+      RUBY
+
+      flags = %w[--full --operators integer_literal]
+      gaps = agent_report(directory, *flags).fetch("gaps").group_by { |gap| gap.fetch("original") }
+      guidance = { "expression" => "options.fetch(:kind)", "patterns" => ['"tail"', ":finished", "81"] }
+      literal = gaps.fetch("123")
+      expect(literal).to all(include("stage" => "not_reached", "branch_condition" => guidance))
+      other_gaps = %w[456 81 789].flat_map { |source| gaps.fetch(source) }
+      expect(other_gaps.flat_map(&:keys)).not_to include("branch_condition")
+      expect(ripr(directory, *flags)).to include('options.fetch(:kind) must match "tail" or :finished or 81 after earlier clauses.')
+    end
+  end
+
   it "flags possible equivalence only when method exits match across several covering tests" do
     Dir.mktmpdir("ripr-equivalence") do |directory|
       FileUtils.mkdir_p(%w[lib test].map { |path| File.join(directory, path) })

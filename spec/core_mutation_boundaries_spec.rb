@@ -18,6 +18,18 @@ RSpec.describe "Core mutation boundaries" do
     expect(result.fetch(:mutants).map { |mutant| mutant.fetch(:original) }).to eq([literal])
   end
 
+  it "ignores comment bytes without changing source encoding or mutation offsets" do
+    source = "# coding: ISO-8859-1\n# caf\u00E9 using ordinary arithmetic\ndef value(x); x + 0; end\n".encode("ISO-8859-1")
+    result = analyze(source.b, operators: ["arithmetic"])
+    mutant = result.fetch(:mutants).first
+
+    expect(result.fetch(:source).encoding).to eq(Encoding::ISO_8859_1)
+    expect(result.fetch(:source).bytes).to eq(source.bytes)
+    expect(result.fetch(:sites).map { |site| site.fetch(:pure) }).to eq([true])
+    expect(source.b.byteslice(mutant.fetch(:start_offset)...mutant.fetch(:end_offset))).to eq("x + 0")
+    expect(mutant.fetch(:location)).to include(line: 3, column: 15)
+  end
+
   it "attributes static mutations by scope and fingerprints the whole source file" do
     source = <<~RUBY
       TOP = 3

@@ -52,9 +52,9 @@ RSpec.describe "ripr reach-map" do
     end
   end
 
-  def capture(directory, *arguments, loader: nil, environment: {})
+  def capture(directory, *arguments, loader: nil, environment: {}, ruby_args: [])
     env = { "RIPR_LOADER" => loader, "REACH_MAP_TEST_SECRET" => "fixture-input" }.merge(environment)
-    Open3.capture3(env, RbConfig.ruby, executable, "reach-map", *arguments, chdir: directory)
+    Open3.capture3(env, RbConfig.ruby, *ruby_args, executable, "reach-map", *arguments, chdir: directory)
   end
 
   def artifact(directory)
@@ -90,6 +90,29 @@ RSpec.describe "ripr reach-map" do
         expect(map.fetch("unattributed").map { |key| key.split(":").last }).to eq(["startup"])
         expect(File).not_to exist(File.join(directory, ".ripr/snapshot.json"))
       end
+    end
+  end
+
+  it "honors a higher timeout base when recording a reach map" do
+    clock = <<~RUBY
+      Process.singleton_class.prepend(Module.new do
+        def clock_gettime(clock, *)
+          value = super
+          clock == Process::CLOCK_MONOTONIC ? value * 1000 : value
+        end
+      end)
+    RUBY
+    slow_tests = test_code.sub("assert_equal(3, Sample.calculate)", "(sleep 0.2; assert_equal(3, Sample.calculate))")
+    with_project("clock.rb" => clock, "lib/sample.rb" => source, "test/sample_test.rb" => slow_tests) do |directory|
+      ruby_args = ["-r", File.join(directory, "clock.rb")]
+      _, error, status = capture(directory, ruby_args: ruby_args)
+      expect(status.exitstatus).to eq(4)
+      expect(error).to include("baseline failed: timeout")
+      expect(File).not_to exist(artifact(directory))
+
+      _, error, status = capture(directory, "--timeout-base", "5000000", ruby_args: ruby_args)
+      expect(status.exitstatus).to eq(0), error
+      expect(JSON.parse(File.read(artifact(directory))).fetch("tests").keys).to eq(%w[SampleTest#test_calculate SampleTest#test_positive])
     end
   end
 
@@ -155,6 +178,106 @@ RSpec.describe "ripr reach-map" do
       _, error, status = capture(directory, "--boot", "boot.rb")
       expect(status.exitstatus).to eq(0), error
       expect(JSON.parse(File.read(artifact(directory))).fetch("opaque_load")).to be(true)
+    end
+  end
+
+  it "fingerprints scalar boot reads without publishing their contents" do
+    boot = <<~RUBY
+      raise unless File.size?('empty.txt').nil?
+      raise unless File.file?('input.txt')
+      raise if File.exist?('missing.txt')
+      raise unless File.size('input.txt') == 16
+      raise unless File.binread('input.txt') == 'load-only-secret'
+      raise unless Dir['input.*'] == ['input.txt']
+    RUBY
+    files = { "boot.rb" => boot, "input.txt" => "load-only-secret", "empty.txt" => "",
+              "lib/sample.rb" => source, "test/sample_test.rb" => test_code }
+    with_project(files) do |directory|
+      _, error, status = capture(directory, "--boot", "boot.rb")
+      expect(status.exitstatus).to eq(0), error
+      raw = File.read(artifact(directory))
+      map = JSON.parse(raw)
+      expect(map.fetch("opaque_load")).to be(false)
+      expect(map.fetch("load_reads")).to match(/\A[0-9a-f]{64}\z/)
+      expect(map.fetch("load_reads")).not_to eq(Digest::SHA256.hexdigest(""))
+      expect(raw).not_to include("load-only-secret")
+    end
+  end
+
+  [2 * 1024 * 1024, (2 * 1024 * 1024) + 1].each do |bytes|
+    it "#{bytes == 2 * 1024 * 1024 ? 'fingerprints' : 'marks opaque'} a boot read returning #{bytes} bytes" do
+      files = { "boot.rb" => "File.binread('input.txt')\n", "input.txt" => "x" * bytes,
+                "lib/sample.rb" => source, "test/sample_test.rb" => test_code }
+      with_project(files) do |directory|
+        _, error, status = capture(directory, "--boot", "boot.rb")
+        expect(status.exitstatus).to eq(0), error
+        expect(JSON.parse(File.read(artifact(directory))).fetch("opaque_load")).to eq(bytes > 2 * 1024 * 1024)
+      end
+    end
+  end
+
+  { "1024 short lines" => ["x\n" * 1024, false], "1025 short lines" => ["x\n" * 1025, true],
+    "a 4096-byte line" => ["x" * 4096, false], "a 4097-byte line" => ["x" * 4097, true] }.each do |name, (input, opaque)|
+    it "#{opaque ? 'marks opaque' : 'fingerprints'} a boot read returning #{name}" do
+      files = { "boot.rb" => "File.readlines('input.txt')\n", "input.txt" => input,
+                "lib/sample.rb" => source, "test/sample_test.rb" => test_code }
+      with_project(files) do |directory|
+        _, error, status = capture(directory, "--boot", "boot.rb")
+        expect(status.exitstatus).to eq(0), error
+        expect(JSON.parse(File.read(artifact(directory))).fetch("opaque_load")).to eq(opaque)
+      end
+    end
+  end
+
+  it "marks a boot with more than 10000 file observations opaque" do
+    files = { "boot.rb" => "10_001.times { File.exist?('missing.txt') }\n",
+              "lib/sample.rb" => source, "test/sample_test.rb" => test_code }
+    with_project(files) do |directory|
+      _, error, status = capture(directory, "--boot", "boot.rb")
+      expect(status.exitstatus).to eq(0), error
+      expect(JSON.parse(File.read(artifact(directory))).fetch("opaque_load")).to be(true)
+    end
+  end
+
+  { 7 => false, 9 => true }.each do |reads, opaque|
+    it "#{opaque ? 'marks opaque' : 'fingerprints'} a boot that reads #{reads * 2} MiB in bounded chunks" do
+      files = { "boot.rb" => "#{reads}.times { File.binread('input.txt') }\n", "input.txt" => "x" * (2 * 1024 * 1024),
+                "lib/sample.rb" => source, "test/sample_test.rb" => test_code }
+      with_project(files) do |directory|
+        _, error, status = capture(directory, "--boot", "boot.rb")
+        expect(status.exitstatus).to eq(0), error
+        expect(JSON.parse(File.read(artifact(directory))).fetch("opaque_load")).to eq(opaque)
+      end
+    end
+  end
+
+  %w[test/fixtures/input.txt spec/fixtures/input.txt test/input.txt test/fixtures/link.txt].each do |path|
+    fixture = %w[test/fixtures/input.txt spec/fixtures/input.txt].include?(path)
+    it "#{fixture ? 'trusts' : 'marks opaque'} a test reading #{path} through an open file" do
+      tests = test_code.sub("def test_calculate = assert_equal(3, Sample.calculate)", <<~RUBY.chomp)
+        def test_calculate
+          file = File.open(File.expand_path(#{path.inspect}))
+          assert_equal("fixture\\n", file.read)
+          file.close
+          assert_equal(3, Sample.calculate)
+        end
+      RUBY
+      files = { "lib/sample.rb" => source, "test/sample_test.rb" => tests, "test/input.txt" => "fixture\n" }
+      files[path] = "fixture\n" unless path.end_with?("/link.txt")
+      with_project(files) do |directory|
+        if path.end_with?("/link.txt")
+          FileUtils.mkdir_p(File.join(directory, "test/fixtures"))
+          File.symlink("../input.txt", File.join(directory, path))
+          git(directory, "add", path)
+          git(directory, "-c", "user.name=Ripr Test", "-c", "user.email=test@example.test", "commit", "-qm", "fixture link")
+        end
+        _, error, status = capture(directory)
+        expect(status.exitstatus).to eq(0), error
+        map = JSON.parse(File.read(artifact(directory)))
+        expect(map.fetch("opaque_load")).to be(false)
+        expect(map.fetch("opaque_tests")).to eq(fixture ? [] : ["SampleTest#test_calculate"])
+        expect(map.fetch("test_files")).to include(path => Digest::SHA256.hexdigest("fixture\n"))
+      end
     end
   end
 

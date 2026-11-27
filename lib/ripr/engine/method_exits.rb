@@ -14,6 +14,7 @@ module Ripr
       AMBIGUOUS_EXIT = ["ambiguous_exit"].freeze
       NOT_CALLED = ["not_called"].freeze
       UNKNOWN_EXIT = ["unknown"].freeze
+      TRUNCATED_EXIT = ["truncated"].freeze
       EXCEPTION_NAMES = [ArgumentError, EOFError, EncodingError, Exception, FiberError, FloatDomainError,
                          FrozenError, IndexError, IOError, KeyError, LoadError, LocalJumpError, NameError,
                          NoMethodError, NotImplementedError, RangeError, RuntimeError, ScriptError, StandardError,
@@ -127,7 +128,11 @@ module Ripr
             next
           end
 
-          shared_calls = [before.size, after.size].min
+          before_truncated = before.last == TRUNCATED_EXIT
+          after_truncated = after.last == TRUNCATED_EXIT
+          before_count = before.size - (before_truncated ? 1 : 0)
+          after_count = after.size - (after_truncated ? 1 : 0)
+          shared_calls = [before_count, after_count].min
           shared_calls.times do |index|
             a = before[index]
             b = after[index]
@@ -136,6 +141,10 @@ module Ripr
             else
               comparable = false
             end
+          end
+          if before_truncated || after_truncated
+            comparable = false
+            next
           end
           next if before.size == after.size
 
@@ -270,7 +279,7 @@ module Ripr
       end
 
       def invalidate(subject, test = nil)
-        subject.calls = test ? subject.calls.except(test) : nil
+        subject.calls = nil unless test
         subject.stopped = true if test
         @frames.delete_if do |_fiber, frames|
           frames.reject! do |frame|
@@ -281,6 +290,8 @@ module Ripr
           end
           frames.empty?
         end
+        prefix = subject.calls&.fetch(test, nil)
+        prefix << TRUNCATED_EXIT if prefix && !prefix.empty?
         subject.calls = nil if subject.calls && subject.calls.empty?
       end
 

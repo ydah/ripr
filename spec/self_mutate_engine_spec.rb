@@ -32,7 +32,6 @@ RSpec.describe "Engine and runtime self-mutation" do
       expect(SelfMutateEngine.suite(mutant)).to eq(%w[spec/shard_cli_spec.rb spec/shard_merge_cli_spec.rb])
     end
   end
-
   it "runs known Engine and runtime variants with the same suites as their original sources" do
     options = ["--jobs", "2", "--only", "9b991da16a", "--only", "fca8dc001e"]
     output, error, status = Open3.capture3(RbConfig.ruby, script, *options, chdir: root)
