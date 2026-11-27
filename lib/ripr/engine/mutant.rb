@@ -4,9 +4,10 @@ module Ripr
   module Engine
     class Mutant < Data.define(:id, :full_id, :site, :subject, :method_hash, :method_start, :method_end, :location, :operator,
                                :replacement, :mode, :original, :mutated, :start_offset, :end_offset, :accepted, :static,
-                               :invalid, :invalid_reason, :original_operator, :fixed_operands)
+                               :invalid, :invalid_reason, :original_operator, :fixed_operands, :branch_condition)
       Location = Data.define(:file, :line, :column, :end_line, :end_column)
-      OPTIONAL_FIELDS = { static: nil, invalid: nil, invalid_reason: nil, original_operator: nil, fixed_operands: nil }.freeze
+      OPTIONAL_FIELDS = { static: nil, invalid: nil, invalid_reason: nil, original_operator: nil, fixed_operands: nil,
+                          branch_condition: nil }.freeze
       private_constant :OPTIONAL_FIELDS
 
       def self.from_analysis(attributes, invalid:)
