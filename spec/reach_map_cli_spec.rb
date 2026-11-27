@@ -52,9 +52,9 @@ RSpec.describe "ripr reach-map" do
     end
   end
 
-  def capture(directory, *arguments, loader: nil, ruby_args: [])
-    Open3.capture3({ "RIPR_LOADER" => loader, "REACH_MAP_TEST_SECRET" => "fixture-input" }, RbConfig.ruby, *ruby_args, executable,
-                   "reach-map", *arguments, chdir: directory)
+  def capture(directory, *arguments, loader: nil, environment: {}, ruby_args: [])
+    env = { "RIPR_LOADER" => loader, "REACH_MAP_TEST_SECRET" => "fixture-input" }.merge(environment)
+    Open3.capture3(env, RbConfig.ruby, *ruby_args, executable, "reach-map", *arguments, chdir: directory)
   end
 
   def artifact(directory)
@@ -64,8 +64,9 @@ RSpec.describe "ripr reach-map" do
   [nil, "require"].each do |loader|
     it "records the full baseline with the #{loader || 'default'} loader" do
       with_project do |directory|
-        _, error, status = capture(directory, loader: loader)
+        output, error, status = capture(directory, loader: loader)
         expect(status.exitstatus).to eq(0), error
+        expect(output).to include("Wrote .ripr/reach-map.json")
         expect(File).to exist(artifact(directory))
         raw = File.read(artifact(directory))
         map = JSON.parse(raw)
@@ -145,8 +146,155 @@ RSpec.describe "ripr reach-map" do
       _, error, status = capture(directory)
       expect(status.exitstatus).to eq(0), error
       map = JSON.parse(File.read(artifact(directory)))
-      expect(map.fetch("unresolved_files")).to eq(["lib/sample.rb"])
+      expect(map).to include("opaque_load" => true, "unresolved_files" => ["lib/sample.rb"])
       expect(map.fetch("deferred_methods").map { |key| key.split(":").last }).to eq(["deferred"])
+    end
+  end
+
+  it "fingerprints explicit boot files and changes to boot directory reads" do
+    boot = "Dir['generated/*.txt']\n"
+    files = { ".gitignore" => "/generated/\n", "boot.rb" => boot,
+              "lib/sample.rb" => source, "test/sample_test.rb" => test_code }
+    with_project(files) do |directory|
+      _, error, status = capture(directory, "--boot", "boot.rb")
+      expect(status.exitstatus).to eq(0), error
+      first = JSON.parse(File.read(artifact(directory)))
+      expect(first.fetch("boot_inputs")).to include("boot.rb" => Digest::SHA256.hexdigest(boot))
+      expect(first.fetch("opaque_load")).to be(false)
+
+      generated = File.join(directory, "generated")
+      FileUtils.mkdir_p(generated)
+      File.write(File.join(generated, "input.txt"), "input\n")
+      _, error, status = capture(directory, "--boot", "boot.rb")
+      expect(status.exitstatus).to eq(0), error
+      second = JSON.parse(File.read(artifact(directory)))
+      expect(second).to include("base" => first.fetch("base"), "opaque_load" => false)
+      expect(second.fetch("load_reads")).not_to eq(first.fetch("load_reads"))
+    end
+  end
+
+  it "marks boot reads that return file metadata as opaque" do
+    with_project("boot.rb" => "File.stat('lib/sample.rb')\n", "lib/sample.rb" => source, "test/sample_test.rb" => test_code) do |directory|
+      _, error, status = capture(directory, "--boot", "boot.rb")
+      expect(status.exitstatus).to eq(0), error
+      expect(JSON.parse(File.read(artifact(directory))).fetch("opaque_load")).to be(true)
+    end
+  end
+
+  it "fingerprints scalar boot reads without publishing their contents" do
+    boot = <<~RUBY
+      raise unless File.size?('empty.txt').nil?
+      raise unless File.file?('input.txt')
+      raise if File.exist?('missing.txt')
+      raise unless File.size('input.txt') == 16
+      raise unless File.binread('input.txt') == 'load-only-secret'
+      raise unless Dir['input.*'] == ['input.txt']
+    RUBY
+    files = { "boot.rb" => boot, "input.txt" => "load-only-secret", "empty.txt" => "",
+              "lib/sample.rb" => source, "test/sample_test.rb" => test_code }
+    with_project(files) do |directory|
+      _, error, status = capture(directory, "--boot", "boot.rb")
+      expect(status.exitstatus).to eq(0), error
+      raw = File.read(artifact(directory))
+      map = JSON.parse(raw)
+      expect(map.fetch("opaque_load")).to be(false)
+      expect(map.fetch("load_reads")).to match(/\A[0-9a-f]{64}\z/)
+      expect(map.fetch("load_reads")).not_to eq(Digest::SHA256.hexdigest(""))
+      expect(raw).not_to include("load-only-secret")
+    end
+  end
+
+  [2 * 1024 * 1024, (2 * 1024 * 1024) + 1].each do |bytes|
+    it "#{bytes == 2 * 1024 * 1024 ? 'fingerprints' : 'marks opaque'} a boot read returning #{bytes} bytes" do
+      files = { "boot.rb" => "File.binread('input.txt')\n", "input.txt" => "x" * bytes,
+                "lib/sample.rb" => source, "test/sample_test.rb" => test_code }
+      with_project(files) do |directory|
+        _, error, status = capture(directory, "--boot", "boot.rb")
+        expect(status.exitstatus).to eq(0), error
+        expect(JSON.parse(File.read(artifact(directory))).fetch("opaque_load")).to eq(bytes > 2 * 1024 * 1024)
+      end
+    end
+  end
+
+  { "1024 short lines" => ["x\n" * 1024, false], "1025 short lines" => ["x\n" * 1025, true],
+    "a 4096-byte line" => ["x" * 4096, false], "a 4097-byte line" => ["x" * 4097, true] }.each do |name, (input, opaque)|
+    it "#{opaque ? 'marks opaque' : 'fingerprints'} a boot read returning #{name}" do
+      files = { "boot.rb" => "File.readlines('input.txt')\n", "input.txt" => input,
+                "lib/sample.rb" => source, "test/sample_test.rb" => test_code }
+      with_project(files) do |directory|
+        _, error, status = capture(directory, "--boot", "boot.rb")
+        expect(status.exitstatus).to eq(0), error
+        expect(JSON.parse(File.read(artifact(directory))).fetch("opaque_load")).to eq(opaque)
+      end
+    end
+  end
+
+  it "marks a boot with more than 10000 file observations opaque" do
+    files = { "boot.rb" => "10_001.times { File.exist?('missing.txt') }\n",
+              "lib/sample.rb" => source, "test/sample_test.rb" => test_code }
+    with_project(files) do |directory|
+      _, error, status = capture(directory, "--boot", "boot.rb")
+      expect(status.exitstatus).to eq(0), error
+      expect(JSON.parse(File.read(artifact(directory))).fetch("opaque_load")).to be(true)
+    end
+  end
+
+  { 7 => false, 9 => true }.each do |reads, opaque|
+    it "#{opaque ? 'marks opaque' : 'fingerprints'} a boot that reads #{reads * 2} MiB in bounded chunks" do
+      files = { "boot.rb" => "#{reads}.times { File.binread('input.txt') }\n", "input.txt" => "x" * (2 * 1024 * 1024),
+                "lib/sample.rb" => source, "test/sample_test.rb" => test_code }
+      with_project(files) do |directory|
+        _, error, status = capture(directory, "--boot", "boot.rb")
+        expect(status.exitstatus).to eq(0), error
+        expect(JSON.parse(File.read(artifact(directory))).fetch("opaque_load")).to eq(opaque)
+      end
+    end
+  end
+
+  %w[test/fixtures/input.txt spec/fixtures/input.txt test/input.txt test/fixtures/link.txt].each do |path|
+    fixture = %w[test/fixtures/input.txt spec/fixtures/input.txt].include?(path)
+    it "#{fixture ? 'trusts' : 'marks opaque'} a test reading #{path} through an open file" do
+      tests = test_code.sub("def test_calculate = assert_equal(3, Sample.calculate)", <<~RUBY.chomp)
+        def test_calculate
+          file = File.open(File.expand_path(#{path.inspect}))
+          assert_equal("fixture\\n", file.read)
+          file.close
+          assert_equal(3, Sample.calculate)
+        end
+      RUBY
+      files = { "lib/sample.rb" => source, "test/sample_test.rb" => tests, "test/input.txt" => "fixture\n" }
+      files[path] = "fixture\n" unless path.end_with?("/link.txt")
+      with_project(files) do |directory|
+        if path.end_with?("/link.txt")
+          FileUtils.mkdir_p(File.join(directory, "test/fixtures"))
+          File.symlink("../input.txt", File.join(directory, path))
+          git(directory, "add", path)
+          git(directory, "-c", "user.name=Ripr Test", "-c", "user.email=test@example.test", "commit", "-qm", "fixture link")
+        end
+        _, error, status = capture(directory)
+        expect(status.exitstatus).to eq(0), error
+        map = JSON.parse(File.read(artifact(directory)))
+        expect(map.fetch("opaque_load")).to be(false)
+        expect(map.fetch("opaque_tests")).to eq(fixture ? [] : ["SampleTest#test_calculate"])
+        expect(map.fetch("test_files")).to include(path => Digest::SHA256.hexdigest("fixture\n"))
+      end
+    end
+  end
+
+  it "fingerprints RSpec options outside the project without exposing their path" do
+    Dir.mktmpdir("ripr-reach-rspec-config") do |config|
+      options = File.join(config, "rspec", "options")
+      FileUtils.mkdir_p(File.dirname(options))
+      File.write(options, "# suite options\n")
+      with_project do |directory|
+        _, error, status = capture(directory, environment: { "XDG_CONFIG_HOME" => config })
+        expect(status.exitstatus).to eq(0), error
+        raw = File.read(artifact(directory))
+        expect(raw).not_to include(config)
+        expect(JSON.parse(raw).fetch("external_inputs")).to include(
+          Digest::SHA256.hexdigest(options) => Digest::SHA256.file(options).hexdigest
+        )
+      end
     end
   end
 

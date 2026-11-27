@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "digest"
 require "fileutils"
 require "json"
 require "json_schemer"
@@ -9,6 +10,7 @@ require "tmpdir"
 
 RSpec.describe "agent diagnosis and triage" do
   let(:root) { File.expand_path("..", __dir__) }
+  let(:v2_schema_path) { File.join(root, "schema/agent-v2.json") }
 
   def ripr(directory, *options)
     output, error, status = Open3.capture3(RbConfig.ruby, File.join(root, "exe/ripr"), "--jobs", "1", *options, chdir: directory)
@@ -17,15 +19,39 @@ RSpec.describe "agent diagnosis and triage" do
   end
 
   def agent_report(directory, *options)
-    report = JSON.parse(ripr(directory, "--reporter", "agent-v2", *options))
-    schema = JSONSchemer.schema(Pathname.new(File.join(root, "schema/agent-v2.json")))
-    expect(schema.validate(report).to_a).to be_empty
-    report
+    flags = %w[--jobs 1 --reporter agent-v2 --reporter agent] + options
+    output, error, status = Open3.capture3(RbConfig.ruby, File.join(root, "exe/ripr"), *flags, chdir: directory)
+    expect(status).to be_success, error
+    reports = output.lines.map { |line| JSON.parse(line) }
+    expect(reports.map { |report| report.fetch("schema") }).to eq(%w[ripr.agent/v2 ripr.agent/v1])
+    reports.zip([v2_schema_path, File.join(root, "schema/agent-v1.json")]).each do |report, path|
+      schema = JSONSchemer.schema(Pathname.new(path))
+      expect(schema.validate(report).to_a).to be_empty
+    end
+    current, legacy = reports
+    stages = %w[not_propagated not_revealed]
+    summary = current.fetch("summary")
+    expected_summary = summary.except(*stages).merge("not_detected" => summary.fetch("not_detected") + summary.values_at(*stages).sum)
+    expect(legacy.fetch("summary")).to eq(expected_summary)
+    expected_gaps = current.fetch("gaps").to_h do |gap|
+      stage = gap.fetch("stage")
+      kind = stages.include?(stage) ? "not_detected" : stage
+      [gap.fetch("full_id"), [kind, *gap.values_at("suggested_inputs", "propagation")]]
+    end
+    legacy_gaps = legacy.fetch("gaps").to_h { |gap| [gap.fetch("full_id"), gap.values_at("kind", "suggested_inputs", "propagation")] }
+    expect(legacy_gaps).to eq(expected_gaps)
+    current
   end
 
   def git(directory, *arguments)
     _output, error, status = Open3.capture3("git", *arguments, chdir: directory)
     raise error unless status.success?
+  end
+
+  it "keeps the published agent v2 schema frozen" do
+    fingerprint = "d29d1627b508fb90d59121f021060e5753afa44a6949f43b3af83f56a9b10bcd"
+    message = "Keep schema/agent-v2.json as published. Add a new schema version for contract changes."
+    expect(Digest::SHA256.file(v2_schema_path).hexdigest).to eq(fingerprint), message
   end
 
   it "ranks method gaps and weak tests with the native diagnostic stages" do
@@ -60,6 +86,56 @@ RSpec.describe "agent diagnosis and triage" do
       edited = agent_report(directory, "--since", "HEAD")
       expect(edited.fetch("gaps")).not_to be_empty
       expect(edited.fetch("gaps")).to all(include("subject" => "Sample.discount", "stage" => "not_revealed", "priority" => 3))
+    end
+  end
+
+  it "shows literal case inputs for gaps in untested branch bodies" do
+    Dir.mktmpdir("ripr-case-input") do |directory|
+      FileUtils.mkdir_p(%w[lib test].map { |path| File.join(directory, path) })
+      File.write(File.join(directory, "lib/sample.rb"), <<~RUBY)
+        module Sample
+          def self.amount(options)
+            case options.fetch(:kind)
+            when "used"
+              0
+            when "tail", :finished, 81
+              123
+            when "mixed", extra_kind
+              456
+            end
+          end
+
+          def self.extra_kind = :extra
+
+          def self.heredoc_amount
+            case String(<<~KIND)
+              example
+            KIND
+            when "tail"
+              789
+            end
+          end
+        end
+      RUBY
+      File.write(File.join(directory, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+
+        class SampleTest < Minitest::Test
+          def test_used
+            assert_equal 0, Sample.amount({ kind: "used" })
+          end
+        end
+      RUBY
+
+      flags = %w[--full --operators integer_literal]
+      gaps = agent_report(directory, *flags).fetch("gaps").group_by { |gap| gap.fetch("original") }
+      guidance = { "expression" => "options.fetch(:kind)", "patterns" => ['"tail"', ":finished", "81"] }
+      literal = gaps.fetch("123")
+      expect(literal).to all(include("stage" => "not_reached", "branch_condition" => guidance))
+      other_gaps = %w[456 81 789].flat_map { |source| gaps.fetch(source) }
+      expect(other_gaps.flat_map(&:keys)).not_to include("branch_condition")
+      expect(ripr(directory, *flags)).to include('options.fetch(:kind) must match "tail" or :finished or 81 after earlier clauses.')
     end
   end
 

@@ -111,6 +111,164 @@ RSpec.describe "ripr reach-map selection" do
     end
   end
 
+  def expect_file_selection(files, loads_trailing:)
+    with_load_audit do |environment, audit|
+      with_project(files) do |directory|
+        base = capture(directory, environment: environment)
+        write(directory, "lib/sample.rb", source.sub("3 + 2", "4 + 2"))
+        commit(directory, "edit method")
+        full = report(directory, base, environment: environment)
+        selected = select_report(directory, base, "--reach-map-files", files.keys.last, environment: environment) do |diagnostic|
+          expect(diagnostic).not_to include("retrying with all test files")
+        end
+
+        expect(baseline_count(full)).to eq(2)
+        expect(baseline_count(selected)).to eq(1)
+        expect(selected.values_at("summary", "gaps")).to eq(full.values_at("summary", "gaps"))
+        trailing = File.realpath(File.join(directory, files.keys.last))
+        loaded = File.readlines(audit, chomp: true)
+        loads_trailing ? expect(loaded).to(include(trailing)) : expect(loaded).not_to(include(trailing))
+      end
+    end
+  end
+
+  it "omits independent Minitest DSL tests with setup and teardown blocks" do
+    support = <<~RUBY
+      require "minitest/spec"
+      Minitest::Test.extend(Minitest::Spec::DSL)
+      class << Minitest::Test
+        alias test it
+        alias setup before
+        alias teardown after
+      end
+    RUBY
+    first = minitest.sub("  def test_positive = assert(Sample.positive?)\n", "")
+                    .sub('require "sample"', "require \"sample\"\nrequire \"./test/support.rb\"")
+    last = <<~RUBY
+      require "minitest/autorun"
+      require "sample"
+      require "./test/support.rb"
+      class LastTest < Minitest::Test
+        setup { @ready = true }
+        teardown { assert(@ready) }
+        test("is positive") { assert(Sample.positive?) }
+      end
+    RUBY
+    expect_file_selection({ "test/support.rb" => support, "test/first_test.rb" => first, "test/last_test.rb" => last },
+                          loads_trailing: false)
+  end
+
+  {
+    "a custom superclass" => [<<~RUBY, "class LastTest < SupportTest\n  def test_positive = assert(Sample.positive?)\nend\n"],
+      class SupportTest < Minitest::Test
+        def self.inherited(child)
+          super
+          $minimum = 5
+        end
+      end
+    RUBY
+    "a class without a superclass" => ["class LastTest < Minitest::Test; end\n", <<~RUBY],
+      class LastTest
+        $minimum = 5
+        def test_positive = assert(Sample.positive?)
+      end
+    RUBY
+    "a class with no tests" => [<<~RUBY, <<~RUBY],
+      Minitest::Test.singleton_class.prepend(Module.new do
+        def inherited(child)
+          super
+          $minimum = 5 if child.name == "ConfigurationTest"
+        end
+      end)
+    RUBY
+      class ConfigurationTest < Minitest::Test
+        def minimum = 5
+      end
+      class LastTest < Minitest::Test
+        def test_positive = assert(Sample.positive?)
+      end
+    RUBY
+    "an unsupported test DSL" => [<<~RUBY, <<~RUBY],
+      require "minitest/spec"
+      Minitest::Test.extend(Minitest::Spec::DSL)
+      Minitest::Test.singleton_class.prepend(Module.new do
+        def inherited(child)
+          super
+          $minimum = 5 if child.name == "LastTest"
+        end
+      end)
+    RUBY
+      class LastTest < Minitest::Test
+        it("is positive") { assert(Sample.positive?) }
+      end
+    RUBY
+    "a class body setting" => ["# shared support\n", <<~RUBY]
+      class LastTest < Minitest::Test
+        $minimum = 5
+        def test_positive = assert(Sample.positive?)
+      end
+    RUBY
+  }.each do |declaration, (support, last)|
+    it "retains trailing Minitest declarations containing #{declaration}" do
+      first = minitest.sub("  def test_positive = assert(Sample.positive?)\n", "")
+                      .sub('require "sample"', "require \"sample\"\nrequire \"./test/support.rb\"")
+                      .sub(":>=, 5", ":>=, $minimum || 0")
+      last = "require \"minitest/autorun\"\nrequire \"sample\"\nrequire \"./test/support.rb\"\n#{last}"
+      expect_file_selection({ "test/support.rb" => support, "test/first_test.rb" => first, "test/last_test.rb" => last },
+                            loads_trailing: true)
+    end
+  end
+
+  it "retains a trailing Minitest file that imports additional test settings" do
+    first = minitest.sub("  def test_positive = assert(Sample.positive?)\n", "").sub(":>=, 5", ":>=, $minimum || 0")
+    last = minitest.sub("  def test_calculate = assert_operator(Sample.calculate, :>=, 5)\n", "")
+                   .sub("SampleTest", "LastTest").sub('require "sample"', "require \"sample\"\nrequire \"./test/settings.rb\"")
+    expect_file_selection({ "test/settings.rb" => "$minimum = 5\n", "test/first_test.rb" => first, "test/last_test.rb" => last },
+                          loads_trailing: true)
+  end
+
+  {
+    "relative imports" => ["require \"./test/settings.rb\"\n", 'require_relative "./test/settings.rb"',
+                           { "test/settings.rb" => "$minimum = 0\n", "test/test/settings.rb" => "$minimum = 5\n" }],
+    "a default require argument" => [<<~RUBY, "require", { "test/settings.rb" => "$minimum = 5\n" }],
+      def require(path = "./test/settings.rb")
+        super(path)
+      end
+    RUBY
+    "a computed require argument" => ["", 'require File.expand_path("settings.rb", __dir__)', { "test/settings.rb" => "$minimum = 5\n" }]
+  }.each do |loader, (setup, declaration, settings)|
+    it "retains a trailing Minitest file with #{loader}" do
+      first = minitest.sub("  def test_positive = assert(Sample.positive?)\n", "")
+                      .sub("class SampleTest", "#{setup}class SampleTest").sub(":>=, 5", ":>=, $minimum || 0")
+      last = minitest.sub("  def test_calculate = assert_operator(Sample.calculate, :>=, 5)\n", "")
+                     .sub("SampleTest", "LastTest").sub('require "sample"', "require \"sample\"\n#{declaration}")
+      expect_file_selection(settings.merge("test/first_test.rb" => first, "test/last_test.rb" => last),
+                            loads_trailing: true)
+    end
+  end
+
+  it "retains a trailing RSpec group with metadata that configures shared test settings" do
+    support = <<~RUBY
+      RSpec.configure do |config|
+        config.on_example_group_definition do |group|
+          $minimum = 5 if group.metadata[:stricter]
+        end
+      end
+    RUBY
+    first = rspec.sub("describe Sample", 'describe "first"').sub(/  it\("is positive"\).*\n/, "")
+                 .sub('require "sample"', "require \"sample\"\nrequire \"./spec/support.rb\"")
+                 .sub("be >= 5", "be >= ($minimum || 0)")
+    last = <<~RUBY
+      require "sample"
+      require "./spec/support.rb"
+      RSpec.describe "last", stricter: true do
+        it("is positive") { expect(Sample.positive?).to be(true) }
+      end
+    RUBY
+    expect_file_selection({ "spec/support.rb" => support, "spec/first_spec.rb" => first, "spec/last_spec.rb" => last },
+                          loads_trailing: true)
+  end
+
   %w[minitest rspec].each do |framework|
     it "loads fewer #{framework} files when a trailing declaration is independent" do
       files = if framework == "minitest"
@@ -152,6 +310,93 @@ RSpec.describe "ripr reach-map selection" do
           expect(File.readlines(audit, chomp: true)).to include(ineligible)
           expect(repeated.values_at("summary", "gaps")).to eq(full.values_at("summary", "gaps"))
         end
+      end
+    end
+  end
+
+  {
+    "inherited" => ["Minitest::Test", "inherited(child)", 'child.name == "LastTest"'],
+    "method_added" => ["Minitest::Test", "method_added(name)", 'self.name == "LastTest" && name == :test_positive'],
+    "const_added" => ["Object", "const_added(name)", "name == :LastTest"]
+  }.each do |hook, (receiver, signature, condition)|
+    it "preserves verdicts with a custom Minitest #{hook} hook" do
+      support = <<~RUBY
+        #{receiver}.singleton_class.prepend(Module.new do
+          def #{signature}
+            super
+            $minimum = 5 if #{condition}
+          end
+        end)
+      RUBY
+      imports = <<~RUBY
+        require "minitest/autorun"
+        require "sample"
+        require "./test/support.rb"
+      RUBY
+      first = imports + <<~RUBY
+        class SampleTest < Minitest::Test
+          def test_calculate = assert_operator(Sample.calculate, :>=, $minimum || 0)
+        end
+      RUBY
+      last = imports + <<~RUBY
+        class LastTest < Minitest::Test
+          def test_positive = assert(Sample.positive?)
+        end
+      RUBY
+
+      with_project("test/first_test.rb" => first, "test/last_test.rb" => last, "test/support.rb" => support) do |directory|
+        base = capture(directory)
+        write(directory, "lib/sample.rb", source.sub("3 + 2", "4 + 2"))
+        selected = select_report(directory, base, "--reach-map-files", "test/last_test.rb")
+        full = report(directory, base)
+
+        expect(full.fetch("summary").fetch("killed")).to eq(4)
+        expect(selected.values_at("summary", "gaps")).to eq(full.values_at("summary", "gaps"))
+      end
+    end
+  end
+
+  {
+    "on_example_group_definition" => <<~RUBY,
+      config.on_example_group_definition do |group|
+        $minimum = 5 if group.metadata[:description] == "last"
+      end
+    RUBY
+    "define_derived_metadata" => 'config.define_derived_metadata(description: "last") { $minimum = 5 }',
+    "when_first_matching_example_defined" => <<~RUBY
+      config.when_first_matching_example_defined(full_description: "last is positive") { $minimum = 5 }
+    RUBY
+  }.each do |hook, code|
+    it "preserves verdicts with the RSpec #{hook} callback" do
+      support = <<~RUBY
+        RSpec.configure do |config|
+          #{code}
+        end
+      RUBY
+      imports = <<~RUBY
+        require "sample"
+        require "./spec/support.rb"
+      RUBY
+      first = imports + <<~RUBY
+        RSpec.describe "first" do
+          it("calculates") { expect(Sample.calculate).to be >= ($minimum || 0) }
+        end
+      RUBY
+      last = imports + <<~RUBY
+        RSpec.describe "last" do
+          it("is positive") { expect(Sample.positive?).to be(true) }
+        end
+      RUBY
+
+      with_project("spec/first_spec.rb" => first, "spec/last_spec.rb" => last, "spec/support.rb" => support) do |directory|
+        base = capture(directory)
+        write(directory, "lib/sample.rb", source.sub("3 + 2", "4 + 2"))
+        commit(directory, "edit method")
+        selected = select_report(directory, base, "--reach-map-files", "spec/last_spec.rb")
+        full = report(directory, base)
+
+        expect(full.fetch("summary").fetch("killed")).to eq(4)
+        expect(selected.values_at("summary", "gaps")).to eq(full.values_at("summary", "gaps"))
       end
     end
   end
@@ -353,6 +598,43 @@ RSpec.describe "ripr reach-map selection" do
       expect(baseline_count(select_report(directory, base))).to eq(2)
       File.write(artifact, JSON.generate(original.merge("test_order" => ["stranger"])))
       expect(baseline_count(select_report(directory, base))).to eq(2)
+    end
+  end
+
+  it "falls back to a full baseline when a cached reach map fails validation" do
+    secondary = "module Secondary\n  def self.calculate = 1 + 1\nend\n"
+    with_project("test/sample_test.rb" => minitest, "lib/secondary.rb" => secondary) do |directory|
+      base = capture(directory)
+      artifact = File.join(directory, ".ripr/reach-map.json")
+      map = JSON.parse(File.read(artifact))
+      write(directory, "lib/sample.rb", source.sub("3 + 2", "4 + 2"))
+      write(directory, "lib/secondary.rb", secondary.sub("1 + 1", "2 + 1"))
+      expect(baseline_count(select_report(directory, base))).to eq(1)
+      full = report(directory, base)
+      expect(baseline_count(full)).to eq(2)
+
+      calculation = "SampleTest#test_calculate"
+      positive = "SampleTest#test_positive"
+      reach = map.fetch("reach")
+      tests = map.fetch("tests")
+      changes = {
+        "unsupported format" => { "version" => map.fetch("version") + 1 },
+        "opaque load" => { "opaque_load" => true },
+        "unknown database inputs" => { "database_inputs" => nil },
+        "stale test location" => { "tests" => tests.merge(calculation => tests.fetch(calculation).merge("line" => 3)) },
+        "incomplete test order" => { "test_order" => [calculation] },
+        "obsolete test ID" => { "reach" => reach.merge(reach.key([positive]) => ["SampleTest#test_removed"]) },
+        "truncated method digest" => { "method_hashes" => map.fetch("method_hashes").merge(reach.key([calculation]) => "truncated") },
+        "stale source digest" => { "sources" => map.fetch("sources").merge("lib/sample.rb" => "0" * 64) }
+      }
+      changes.each do |label, overrides|
+        aggregate_failures(label) do
+          File.write(artifact, JSON.generate(map.merge(overrides)))
+          result = select_report(directory, base)
+          expect(baseline_count(result)).to eq(2), "Expected a full baseline for #{label}, got #{baseline_count(result)} tests"
+          expect(result.values_at("summary", "gaps")).to eq(full.values_at("summary", "gaps"))
+        end
+      end
     end
   end
 

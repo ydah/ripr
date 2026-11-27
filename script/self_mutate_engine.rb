@@ -12,7 +12,8 @@ require_relative "../lib/ripr/core/analyzer"
 require_relative "../lib/ripr/engine/child"
 
 module SelfMutateEngine
-  CACHE_TESTS = %w[spec/cache_cli_spec.rb spec/kill_order_spec.rb].freeze
+  CALL_GRAPH_REUSE_TEST = "spec/call_graph_reuse_cli_spec.rb"
+  CACHE_TESTS = ["spec/cache_cli_spec.rb", "spec/kill_order_spec.rb", CALL_GRAPH_REUSE_TEST].freeze
   CLI_TESTS = ["spec/cli_spec.rb"].freeze
   SUITES = {
     "baseline_cache.rb" => ["spec/baseline_cache_spec.rb", *CACHE_TESTS],
@@ -21,10 +22,11 @@ module SelfMutateEngine
     "mutant.rb" => %w[spec/mutation_plan_spec.rb spec/cli_spec.rb],
     "profile.rb" => %w[spec/profile_spec.rb],
     "result_cache.rb" => ["spec/result_cache_spec.rb", *CACHE_TESTS],
-    "runner.rb" => %w[spec/mutation_plan_spec.rb spec/cli_spec.rb spec/cache_cli_spec.rb spec/profile_spec.rb],
+    "runner.rb" => ["spec/mutation_plan_spec.rb", "spec/cli_spec.rb", "spec/cache_cli_spec.rb", CALL_GRAPH_REUSE_TEST,
+                    "spec/profile_spec.rb"],
     "runtime.rb" => %w[spec/runtime_spec.rb spec/instrumenter_spec.rb],
-    "scheduler.rb" => %w[spec/kill_order_spec.rb spec/cli_spec.rb spec/propagation_cli_spec.rb],
-    "static_run.rb" => CLI_TESTS,
+    "scheduler.rb" => ["spec/kill_order_spec.rb", CALL_GRAPH_REUSE_TEST, "spec/cli_spec.rb", "spec/propagation_cli_spec.rb"],
+    "static_run.rb" => ["spec/static_run_spec.rb", *CLI_TESTS],
     "type_checker.rb" => %w[spec/type_checker_spec.rb],
     "worker_memory.rb" => %w[spec/worker_memory_spec.rb]
   }.freeze
