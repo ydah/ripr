@@ -458,6 +458,37 @@ RSpec.describe "Core source analysis" do
     expect(instrument(source).fetch(:code)).to include(",false)")
   end
 
+  it "ignores refinement words in actual Ruby comments when allowing value speculation" do
+    source = <<~RUBY
+      # using the proleptic Gregorian calendar
+      =begin
+      refine Numeric do
+      end
+      =end
+      def value(x)
+        x + 0 # using ordinary Integer arithmetic
+      end
+    RUBY
+    result = analyze(source, operators: ["arithmetic"])
+    expect(result.fetch(:sites).map { |site| site.fetch(:pure) }).to eq([true])
+    expect(result.fetch(:source).bytes).to eq(source.bytes)
+    expect(instrument(source, result).fetch(:code)).to include(",true)")
+  end
+
+  it "retains the conservative refinement guard for strings, dynamic references, and real calls" do
+    [
+      'message = "using the Gregorian calendar"',
+      'send("using", CustomOperators)',
+      "public_send(:refine, Integer)",
+      "using(CustomOperators)",
+      "module CustomOperators; refine Integer do; end; end"
+    ].each do |statement|
+      source = "#{statement}\ndef value(x); x + 0; end\n"
+      result = analyze(source, operators: ["arithmetic"])
+      expect(result.fetch(:sites).map { |site| site.fetch(:pure) }).to eq([false]), statement
+    end
+  end
+
   it "emits matching site tables and reparsable code for nested default operators" do
     source = "def value(x, enabled); saved = true; enabled && (x + 2 >= 18) ? saved : false; end\n"
     result = analyze(source)

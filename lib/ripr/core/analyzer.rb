@@ -41,7 +41,13 @@ module Ripr
           @warnings << "#{@path}: #{parsed.errors.map(&:message).join('; ')}"
           parsed.errors.each { |error| skip(error.location, "parse error: #{error.message}") } if @skipped
         else
-          parsed.comments.each { |comment| disable(comment) }
+          code = @source.b
+          parsed.comments.each do |comment|
+            disable(comment)
+            location = comment.location
+            code[location.start_offset, location.length] = " " * location.length
+          end
+          @pure = !code.force_encoding(@source.encoding).match?(/\b(using|refine)\b/)
           discover(parsed.value, [], false, @include_static ? "root" : nil)
         end
         { source: @source, sites: @sites, mutants: @mutants, warnings: @warnings, static: @static }
@@ -312,7 +318,7 @@ module Ripr
         @mutants << mutant
         site = @sites.find { |entry| entry[:key] == key }
         unless site
-          site = { key: key, node: node, operator: operator, variants: [], pure: !@source.match?(/\b(using|refine)\b/) }
+          site = { key: key, node: node, operator: operator, variants: [], pure: @pure }
           @sites << site
         end
         site[:variants] << mutant
