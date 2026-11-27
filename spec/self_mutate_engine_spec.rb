@@ -10,6 +10,18 @@ RSpec.describe "Engine and runtime self-mutation" do
   let(:root) { File.expand_path("..", __dir__) }
   let(:script) { File.join(root, "script/self_mutate_engine.rb") }
 
+  it "uses the reach-map specifications for reach mutations in Runner" do
+    require_relative "../script/self_mutate_engine"
+
+    location = { file: "lib/ripr/engine/runner.rb" }
+    %w[record_reach_map reach_baseline prepare_test_file_loading prepare_reach_selection].each do |method|
+      mutant = { location: location, subject: "Ripr::Engine::Runner##{method}" }
+      expect(SelfMutateEngine.suite(mutant)).to eq(%w[spec/reach_map_cli_spec.rb spec/reach_selection_cli_spec.rb])
+    end
+    mutant = { location: location, subject: "Ripr::Engine::Runner#load_tests" }
+    expect(SelfMutateEngine.suite(mutant)).to include("spec/cache_cli_spec.rb", "spec/profile_spec.rb")
+  end
+
   it "runs known Engine and runtime variants with the same suites as their original sources" do
     options = ["--jobs", "2", "--only", "9b991da16a", "--only", "fca8dc001e"]
     output, error, status = Open3.capture3(RbConfig.ruby, script, *options, chdir: root)
