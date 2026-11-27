@@ -15,6 +15,7 @@ module SelfMutateEngine
   CALL_GRAPH_REUSE_TEST = "spec/call_graph_reuse_cli_spec.rb"
   CACHE_TESTS = ["spec/cache_cli_spec.rb", "spec/kill_order_spec.rb", CALL_GRAPH_REUSE_TEST].freeze
   CLI_TESTS = ["spec/cli_spec.rb"].freeze
+  RUNNER_REACH_METHODS = %w[record_reach_map reach_baseline prepare_test_file_loading prepare_reach_selection].freeze
   SUITES = {
     "baseline_cache.rb" => ["spec/baseline_cache_spec.rb", *CACHE_TESTS],
     "baseline_stability.rb" => %w[spec/baseline_stability_cli_spec.rb],
@@ -130,12 +131,16 @@ module SelfMutateEngine
     end
   end
 
-  def suite(path)
-    SUITES.fetch(File.basename(path)) { ["spec/engine_spec.rb", *CLI_TESTS] }
+  def suite(mutant)
+    file = File.basename(mutant.fetch(:location).fetch(:file))
+    method = mutant.fetch(:subject).delete_prefix("Ripr::Engine::Runner#")
+    return SUITES.fetch("reach_map.rb") if file == "runner.rb" && RUNNER_REACH_METHODS.include?(method)
+
+    SUITES.fetch(file) { ["spec/engine_spec.rb", *CLI_TESTS] }
   end
 
   def run_baselines(project, workspace, mutants, jobs, timeout_seconds, bundle_path)
-    suites = mutants.map { |mutant| suite(mutant.fetch(:location).fetch(:file)) }.uniq
+    suites = mutants.map { |mutant| suite(mutant) }.uniq
     results = Ripr::Engine::Child.batch(suites, jobs: jobs, timeout: ->(_) { (timeout_seconds + 10) * 1000 }) do |tests, _|
       Dir.mktmpdir("baseline-", workspace) do |directory|
         copy_project(project, directory)
@@ -165,7 +170,7 @@ module SelfMutateEngine
         copy_project(project, directory)
         source = analyses.fetch(path).fetch(:source)
         File.binwrite(File.join(directory, path), Ripr::Core::Instrumenter.mutate(source, mutant))
-        run_specs(directory, suite(path), timeout_seconds: timeout_seconds, bundle_path: bundle_path)
+        run_specs(directory, suite(mutant), timeout_seconds: timeout_seconds, bundle_path: bundle_path)
       end
     end
     runs.map { |mutant, result| outcome(mutant, result) }
