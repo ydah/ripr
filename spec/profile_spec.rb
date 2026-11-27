@@ -28,6 +28,44 @@ RSpec.describe "ripr profiling" do
     JSON.parse(File.read(File.join(directory, report_dir, "profile.json")))
   end
 
+  it "exports cumulative phase milliseconds and nearest-rank worker latencies" do
+    require "ripr/engine/profile"
+
+    recorder = Class.new(Ripr::Engine::Profile) do
+      attr_accessor :timestamp
+
+      def now = timestamp
+    end.new
+    recorder.timestamp = 3.0
+    recorder.phase("plan", 1.0)
+    recorder.timestamp = 4.25
+    recorder.phase("instrument", 4.0)
+    recorder.timestamp = 5.0
+    recorder.phase("plan", 4.0)
+    [["b", 20], ["a", 10], ["d", 40], ["c", 30]].each do |id, duration|
+      recorder.record_mutation({ "id" => id }, { "tests" => { "test" => {} } }, duration)
+    end
+    recorder.record_diagnosis({ "id" => "a" }, { "tests" => { "test" => {} } }, 50)
+
+    Dir.mktmpdir("ripr-profile-values") do |directory|
+      recorder.write(directory, 4, { "baseline_tests_run" => 1, "reused" => 0 }, { "tests" => { "test" => {} } })
+      stats = profile(directory, ".")
+
+      expect(stats.fetch("phases_ms")).to eq(
+        "plan" => 2750.0, "instrument" => 250.0, "boot" => 0.0, "baseline" => 0.0, "mutation" => 0.0, "report" => 0.0
+      )
+      expect(stats.fetch("mutations")).to include(
+        "attempted" => 4, "tests_run" => 4, "unknown_test_counts" => 0,
+        "latency_ms" => { "p50" => 20, "p95" => 40 }
+      )
+      expect(stats.fetch("mutations").fetch("attempts").map { |attempt| attempt.fetch("id") }).to eq(%w[a b c d])
+      expect(stats.fetch("diagnosis")).to include(
+        "attempted" => 1, "tests_run" => 1, "tests_per_mutation" => 1.0,
+        "latency_ms" => { "p50" => 50, "p95" => 50 }
+      )
+    end
+  end
+
   it "writes phase timings and actual mutation test counts without changing the agent report" do
     with_fixture do |directory|
       report = command(directory, "--profile", "--report-dir", "results")
@@ -65,6 +103,7 @@ RSpec.describe "ripr profiling" do
       command(directory, "--profile", "--dry-run")
       stats = profile(directory)
       expect(stats.fetch("phases_ms")).to include("boot" => 0.0, "baseline" => 0.0, "mutation" => 0.0)
+      expect(stats.fetch("baseline")).to eq("tests_run" => 0, "tests_reused" => 0, "cache_hit_fraction" => nil)
       expect(stats.fetch("mutations")).to include("selected" => 12, "attempted" => 0, "probe_skipped" => 0,
                                                   "skipped_fraction" => nil, "cache_hit_fraction" => nil)
     end
