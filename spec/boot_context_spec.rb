@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "prism"
 require "tempfile"
 require "tmpdir"
 require "ripr/engine/boot_context"
@@ -79,6 +80,96 @@ RSpec.describe Ripr::Engine::BootContext do
     end
   end
 
+  it "tracks directory entries returned to the boot script by glob and bracket queries" do
+    Dir.mktmpdir do |external|
+      pattern = File.join(external, "*.yml")
+      %i[glob []].each do |query|
+        write("setup.rb", "Dir.#{query}(#{pattern.dump})\n")
+        initial = fingerprint
+        expect(initial).to match(/\A[a-f0-9]{64}\z/)
+        expect(fingerprint).to eq(initial)
+
+        added = File.join(external, "#{query}.yml")
+        File.write(added, "enabled: true\n")
+        expect(fingerprint).not_to eq(initial)
+      end
+    end
+  end
+
+  ["|entry| entry", "break true", "break []"].each do |body|
+    it "treats a boot glob with #{body.inspect} as opaque" do
+      write("external/settings.yml", "enabled: true\n")
+      write("setup.rb", "Dir.glob('external/*.yml') { #{body} }\n")
+
+      expect(fingerprint).to be_nil
+    end
+  end
+
+  it "tracks file sizes and directory entries consumed outside the project input globs" do
+    write("setup.rb", "Dir.children('state')\nFile.size('state/settings')\n")
+    write("state/settings", "first\n")
+    initial = fingerprint
+    expect(initial).to match(/\A[a-f0-9]{64}\z/)
+
+    write("state/settings", "longer contents\n")
+    changed_size = fingerprint
+    expect(changed_size).to match(/\A[a-f0-9]{64}\z/)
+    expect(changed_size).not_to eq(initial)
+    write("state/extra", "new entry\n")
+    changed_entries = fingerprint
+    expect(changed_entries).to match(/\A[a-f0-9]{64}\z/)
+    expect(changed_entries).not_to eq(changed_size)
+  end
+
+  it "declines reuse when a loaded script changes or disappears after boot" do
+    write("setup.rb", "load File.join(__dir__, 'helper.rb')\n")
+    write("helper.rb", "true\n")
+    context = described_class.new(boot: "setup.rb", rails: false)
+    context.observe { load File.expand_path("setup.rb") }
+    expect(context.fingerprint).to match(/\A[a-f0-9]{64}\z/)
+
+    write("helper.rb", "false\n")
+    expect(context.fingerprint).to be_nil
+
+    write("helper.rb", "true\n")
+    expect(context.fingerprint).to match(/\A[a-f0-9]{64}\z/)
+    File.delete("helper.rb")
+    expect(context.fingerprint).to be_nil
+  end
+
+  it "declines reuse when boot consumes a non-file IO stream" do
+    write("setup.rb", "true\n")
+    context = described_class.new(boot: "setup.rb", rails: false)
+    IO.pipe do |reader, writer|
+      writer.write("1")
+      read = context.observe do
+        load File.expand_path("setup.rb")
+        reader.read(1)
+      end
+      expect(read).to eq("1")
+    end
+    expect(context.fingerprint).to be_nil
+  end
+
+  it "leaves scripts outside a loaded gem's Ruby require paths opaque" do
+    Dir.mktmpdir do |dependency|
+      dependency = File.realpath(dependency)
+      gem_spec = Gem::Specification.new("boot-dependency", "1.0.0")
+      gem_spec.full_gem_path = dependency
+      allow(Gem).to receive(:loaded_specs).and_return(Gem.loaded_specs.merge(gem_spec.name => gem_spec))
+
+      library = File.join(dependency, "lib", "boot_dependency.rb")
+      write(library, "true\n")
+      write("setup.rb", "load #{library.dump}\n")
+      expect(fingerprint).to match(/\A[a-f0-9]{64}\z/)
+
+      helper = File.join(dependency, "helper.rb")
+      write(helper, "true\n")
+      write("setup.rb", "load #{helper.dump}\n")
+      expect(fingerprint).to be_nil
+    end
+  end
+
   it "leaves dynamic processes, application time, randomness, and string evaluation opaque" do
     operations = ["system(RbConfig.ruby, '-e', 'exit 0')", "Time.now", "eval('true')",
                   "[1, 2].sample", "[1, 2].shuffle", "[1, 2].shuffle!"]
@@ -95,8 +186,10 @@ RSpec.describe Ripr::Engine::BootContext do
   end
 
   it "refuses boot code that introspects method bodies or starts a tracer" do
+    write("helper.rb", "true\n")
     operations = ["RubyVM::InstructionSequence.of(method(:puts))", "TracePoint.new(:call) {}.enable {}",
-                  "Thread.current.set_trace_func(nil)"]
+                  "Thread.current.set_trace_func(nil)", "RubyVM::AbstractSyntaxTree.parse_file('helper.rb')",
+                  "Prism.parse_file('helper.rb')", "RubyVM::InstructionSequence.compile('true').disasm"]
     operations.each do |code|
       write("setup.rb", "#{code}\n")
       expect(fingerprint).to be_nil

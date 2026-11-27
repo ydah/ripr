@@ -314,6 +314,28 @@ RSpec.describe Ripr::Engine::MethodExits do
     expect(described_class.compare({ "test" => [%w[raise ArgumentError]] }, { "test" => [["ambiguous_exit"]] }, ["test"])).to be_nil
   end
 
+  it "retains independently repeatable tests without proving unchanged exits for incomplete evidence" do
+    original = {
+      "Sample" => { "stable" => [returned(true)], "opaque" => [nil],
+                    "ambiguous" => [described_class::AMBIGUOUS_EXIT], "unstable" => [returned(1)] }
+    }
+    repeated = { "Sample" => original.fetch("Sample").merge("unstable" => [returned(2)]) }
+    stable = described_class.stable(original, repeated)
+
+    expect(stable).to eq("Sample" => { "stable" => [returned(true)] })
+    expect(stable).to be_frozen
+    expect(stable.fetch("Sample")).to be_frozen
+    subset = original.fetch("Sample").keys
+    expect(described_class.compare(stable.fetch("Sample"), repeated.fetch("Sample"), subset)).to be_nil
+
+    mutant = repeated.fetch("Sample").merge("stable" => [returned(false)])
+    expect(described_class.compare(stable.fetch("Sample"), mutant, subset)).to eq(
+      "status" => "not_revealed",
+      "propagation" => { "test_id" => "stable", "call" => 1, "original" => returned(true), "mutant" => returned(false) }
+    )
+    expect(described_class.stable(original, {})).to be_empty
+  end
+
   it "reports a change in the number of calls when both runs observed the test" do
     original = { "test" => [returned(1)] }
     mutant = { "test" => [returned(1), returned(1)] }
@@ -332,7 +354,7 @@ RSpec.describe Ripr::Engine::MethodExits do
     expect(observations.fetch("Sample#compute").fetch("small")).to be_frozen
   end
 
-  it "keeps every exit at the per-test call limit and drops the subject on the next call" do
+  it "preserves observed exits through the per-test call limit" do
     instance = subject_class.new
     targets = { "Sample#compute" => instance.method(:compute) }
     _, observations = described_class.observe(targets) do
@@ -340,20 +362,40 @@ RSpec.describe Ripr::Engine::MethodExits do
     end
     expect(observations).to eq("Sample#compute" => { "test" => Array.new(32, returned(false)) })
 
-    _, overflow = described_class.observe(targets) do
-      as_test("test") { 33.times { instance.compute(false) } }
+    limit = described_class::MAX_CALLS_PER_TEST
+    capture = lambda do |first, count|
+      described_class.observe(targets) do
+        as_test("large") do
+          instance.compute(first)
+          (count - 1).times { instance.compute(false) }
+        end
+      end.last
     end
-    expect(overflow).to eq("Sample#compute" => nil)
+
+    original = capture.call(false, limit + 1)
+    repeat = capture.call(false, limit + 1)
+    stable = described_class.stable(original, repeat).fetch("Sample#compute")
+    changed = JSON.parse(JSON.generate(capture.call(true, limit + 1))).fetch("Sample#compute")
+    shorter = capture.call(false, limit - 1).fetch("Sample#compute")
+
+    expect(described_class.compare(stable, changed, ["large"])).to eq(
+      "status" => "not_revealed",
+      "propagation" => { "test_id" => "large", "call" => 1, "original" => returned(false), "mutant" => returned(true) }
+    )
+    expect(described_class.compare(stable, original.fetch("Sample#compute"), ["large"])).to be_nil
+    expect(described_class.compare(stable, shorter, ["large"])).to be_nil
+    expect(described_class.compare(shorter, stable, ["large"])).to be_nil
   end
 
-  it "drops a subject when its calls across tests exceed the per-subject limit" do
+  it "keeps complete tests when calls across tests exceed the per-subject limit" do
     instance = subject_class.new
     targets = { "Sample#compute" => instance.method(:compute) }
     _, overflow = described_class.observe(targets) do
       8.times { |test| as_test("test #{test}") { 32.times { instance.compute(false) } } }
       as_test("one more test") { instance.compute(false) }
     end
-    expect(overflow).to eq("Sample#compute" => nil)
+    retained = (0...8).to_h { |test| ["test #{test}", Array.new(32, returned(false))] }
+    expect(overflow).to eq("Sample#compute" => retained)
   end
 
   it "preserves exits from subjects within the total call limit when a later subject exceeds it" do
@@ -411,5 +453,62 @@ RSpec.describe Ripr::Engine::MethodExits do
       loader&.uninstall
       Object.send(:remove_const, :MethodExitsFixture) if defined?(MethodExitsFixture)
     end
+  end
+
+  it "retains complete tests after the per-subject budget and skips incomplete comparisons" do
+    instance = Class.new do
+      def value = 1
+    end.new
+    exits = Ripr::Engine::MethodExits
+    _, observations = exits.observe("value" => instance.method(:value)) do
+      8.times { |index| as_test(index.to_s) { 32.times { instance.value } } }
+      as_test("overflow") { 33.times { instance.value } }
+    end
+
+    expected = ["return", ["Integer", 1]]
+    expect(observations.fetch("value")).to eq((0..7).to_h { |index| [index.to_s, Array.new(32, expected)] })
+    stable = exits.stable(observations, observations).fetch("value")
+    expect(exits.compare(stable, observations.fetch("value"), %w[0 overflow])).to be_nil
+  end
+
+  it "removes recursive frames after overflow and keeps another subject observable" do
+    instance = Class.new do
+      def recursive(depth)
+        recursive(depth - 1) if depth.positive?
+        1
+      end
+
+      def other = 2
+    end.new
+    _, observations = Ripr::Engine::MethodExits.observe("recursive" => instance.method(:recursive), "other" => instance.method(:other)) do
+      as_test("small") { Fiber.new { instance.recursive(1) }.resume }
+      as_test("overflow") { Fiber.new { instance.recursive(33) }.resume }
+      as_test("other") { instance.other }
+    end
+
+    expect(observations).to eq(
+      "recursive" => { "small" => Array.new(2, ["return", ["Integer", 1]]) },
+      "other" => { "other" => [["return", ["Integer", 2]]] }
+    )
+  end
+
+  it "drops suspended tests when the subject stops observing calls" do
+    instance = Class.new do
+      def value(pause: false)
+        Fiber.yield if pause
+        1
+      end
+    end.new
+    pending = Fiber.new { instance.value(pause: true) }
+    exits = Ripr::Engine::MethodExits
+    _, observations = exits.observe("value" => instance.method(:value)) do
+      as_test("pending") { pending.resume }
+      as_test("complete") { instance.value }
+      as_test("overflow") { 33.times { instance.value } }
+    end
+
+    stable = exits.stable(observations, observations).fetch("value")
+    expect(stable.keys).to contain_exactly("complete", "overflow")
+    expect(exits.compare(stable, observations.fetch("value"), ["overflow"])).to be_nil
   end
 end

@@ -270,10 +270,10 @@ module Ripr
         owner = event.defined_class
         return true if PROCESS_CALLS.include?(name) && PROCESS_OWNERS.include?(owner)
         return true if INSPECTIONS[owner]&.include?(name) && project_invocation?(event.path)
-        return false unless project_path?(event.path)
 
-        (owner == TracePoint && %i[enable disable].include?(name)) || %i[set_trace_func add_trace_func].include?(name) ||
-          (REFLECTIVE_CALLS.include?(name) && REFLECTIVE_OWNERS.include?(owner))
+        relevant = (owner == TracePoint && %i[enable disable].include?(name)) || %i[set_trace_func add_trace_func].include?(name) ||
+                   (REFLECTIVE_CALLS.include?(name) && REFLECTIVE_OWNERS.include?(owner))
+        relevant && project_path?(event.path)
       end
 
       def file_owner?(owner)
