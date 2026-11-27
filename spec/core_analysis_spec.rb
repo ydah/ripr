@@ -189,6 +189,80 @@ RSpec.describe "Core source analysis" do
     expect(mutants.map { |mutant| mutant.fetch(:full_id) }).to eq(expected)
   end
 
+  it "attaches literal case conditions only to mutations inside the branch" do
+    source = <<~RUBY
+      def choose(value, other)
+        case value
+        when "known", :other, 7, true, false, nil, :last, "x"
+          21
+          def nested; 22; end
+          case other
+          when 8 then 23
+          end
+        else 24
+        end
+      end
+    RUBY
+    mutants = analyze(source, operators: %w[integer_literal case_when]).fetch(:mutants)
+    outer = { "expression" => "value", "patterns" => ['"known"', ":other", "7", "true", "false", "nil", ":last", '"x"'] }
+    inner = { "expression" => "other", "patterns" => ["8"] }
+    relevant = mutants.select { |mutant| mutant.key?(:branch_condition) }
+
+    expect(relevant.map { |mutant| mutant.values_at(:original, :branch_condition) }.uniq).to contain_exactly(
+      ["21", outer], ["8", outer], ["23", inner]
+    )
+    expect(mutants.map { |mutant| mutant.fetch(:original) }).to include("7", "22", "24")
+  end
+
+  it "keeps only bounded case selectors and literal patterns in branch conditions" do
+    limit = %("#{'é' * 59}")
+    too_long = %("#{'é' * 59}a")
+    cases = [
+      [limit, limit, { "expression" => limit, "patterns" => [limit] }],
+      ["left << right", "7", { "expression" => "left << right", "patterns" => ["7"] }],
+      [too_long, "7", nil],
+      ["value", too_long, nil],
+      ["left	+ right", "7", nil],
+      ["value", "1, 2, 3, 4, 5, 6, 7, 8, 9", nil],
+      ["value", "7, /dynamic/", nil],
+      ["", "7", nil]
+    ]
+    cases.each do |selector, pattern, condition|
+      source = "def choose(value, left, right); case #{selector}; when #{pattern}; 42; end; end"
+      mutants = analyze(source, operators: ["integer_literal"]).fetch(:mutants)
+      body = mutants.select { |mutant| mutant.fetch(:original) == "42" }
+
+      expect(body).not_to be_empty
+      expect(body.map { |mutant| mutant[:branch_condition] }.uniq).to eq([condition])
+    end
+  end
+
+  it "omits case conditions whose source includes a heredoc or cannot be converted to UTF-8" do
+    source = <<~RUBY
+      def choose(value)
+        case String(<<~KIND)
+          tail
+        KIND
+        when "tail" then 51
+        end
+
+        case value
+        when <<~KIND
+          tail
+        KIND
+          52
+        end
+      end
+    RUBY
+    binary = "# coding: ASCII-8BIT\ndef choose(value); case value; when \"\xFF\"; 53; end; end".b
+    [source, binary].each do |input|
+      mutants = analyze(input, operators: ["integer_literal"]).fetch(:mutants)
+
+      expect(mutants).not_to be_empty
+      expect(mutants.flat_map(&:keys)).not_to include(:branch_condition)
+    end
+  end
+
   it "removes duplicate and unchanged integer replacements" do
     { "0" => %w[1 -1], "1" => %w[2 0], "-1" => %w[0 -2], "9" => %w[10 8 0] }.each do |literal, replacements|
       result = analyze("def number; #{literal}; end", operators: ["integer_literal"])

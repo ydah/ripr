@@ -2,11 +2,81 @@
 
 require "fileutils"
 require "json"
+require "json_schemer"
 require "open3"
 require "rbconfig"
 require "tmpdir"
 
 RSpec.describe "method-exit mutation diagnosis" do
+  it "reports a changed implicit return after many nil returns" do
+    Dir.mktmpdir("ripr-implicit-return") do |directory|
+      FileUtils.mkdir_p(%w[lib test].map { |path| File.join(directory, path) })
+      File.write(File.join(directory, "lib/sample.rb"), <<~RUBY)
+        module Sample
+          Outcome = Class.new
+
+          def self.compute(events, count)
+            return :skipped if count.negative?
+
+            events << count
+            Outcome.new if count.positive?
+          end
+
+          def self.unstable(events, count)
+            events << count
+            Outcome.new if count.zero?
+          end
+        end
+      RUBY
+      File.write(File.join(directory, "test/sample_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+        require_relative "../lib/sample"
+
+        class SampleTest < Minitest::Test
+          def test_compute
+            events = []
+            Sample.compute(events, -1)
+            100.times { Sample.compute(events, 0) }
+            Sample.compute(events, 1)
+            assert_equal [0] * 100 + [1], events
+          end
+
+          def test_unstable
+            counter = "unstable-order"
+            run = File.exist?(counter) ? File.read(counter).to_i : 0
+            File.write(counter, (run + 1).to_s)
+            order = run.even? ? [0, 1] : [1, 0]
+            events = []
+            order.each { |count| Sample.unstable(events, count) }
+            assert_equal order, events
+          end
+        end
+      RUBY
+
+      executable = File.expand_path("../exe/ripr", __dir__)
+      arguments = %w[--full --jobs 1 --operators return_nil --reporter agent-v2 --reporter text]
+      output, error, status = Open3.capture3(RbConfig.ruby, executable, *arguments, chdir: directory)
+
+      expect(status.exitstatus).to eq(0), error
+      json, *text = output.lines
+      report = JSON.parse(json)
+      schema = JSONSchemer.schema(Pathname.new(File.expand_path("../schema/agent-v2.json", __dir__)))
+      expect(schema.validate(report).to_a).to be_empty
+      expect(report.fetch("summary")).to include("killed" => 0, "error" => 0, "timeout" => 0, "survived" => 2)
+      gaps = report.fetch("gaps").to_h { |gap| [gap.fetch("subject"), gap] }
+      gap = gaps.fetch("Sample.compute")
+      expect(gap).to include("subject" => "Sample.compute", "operator" => "return_nil", "stage" => "not_revealed")
+      expect(gap.fetch("propagation")).to include(
+        "test_id" => "SampleTest#test_compute", "call" => 101, "observation" => "implicit_return",
+        "original" => ["return_type", "Sample::Outcome"], "mutant" => ["return", ["NilClass", nil]]
+      )
+      expect(text.join).to include("Sample.compute returned an instance of Sample::Outcome", "(implicit return 101)")
+      unstable = gaps.fetch("Sample.unstable")
+      expect(unstable.fetch("stage")).to eq("not_detected")
+      expect(unstable).not_to have_key("propagation")
+    end
+  end
+
   it "retains a stable changed exit when another covering test returns an opaque or unstable value" do
     Dir.mktmpdir("ripr-partial-propagation") do |directory|
       FileUtils.mkdir_p(%w[lib test].map { |path| File.join(directory, path) })

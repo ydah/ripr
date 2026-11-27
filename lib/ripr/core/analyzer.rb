@@ -9,6 +9,9 @@ module Ripr
   module Core
     class Analyzer
       OPERATORS = Operators::NAMES
+      CASE_LITERAL_NODES = [Prism::StringNode, Prism::SymbolNode, Prism::IntegerNode, Prism::TrueNode, Prism::FalseNode,
+                            Prism::NilNode].freeze
+      private_constant :CASE_LITERAL_NODES
 
       def self.call(source, path, operators: OPERATORS, arid_callees: %w[logger.* puts pp warn], static: false, skipped: nil)
         new(source, path, operators, arid_callees, static, skipped).call
@@ -179,13 +182,45 @@ module Ripr
           end
         end
         next_depth = depth + (node.is_a?(Prism::AndNode) || node.is_a?(Prism::OrNode) ? 1 : 0)
+        condition = case_branch_condition(node, parent) if node.is_a?(Prism::WhenNode) && parent.is_a?(Prism::CaseNode)
         children(node).each do |field, child|
           if field == "block" && define_method_block?(node)
             discover_body(node, child.body, context[:subject].split(/[.#]/).first.split("::"), false, deferred_name(node))
           else
-            walk(child, "#{ast_path}.#{field}", context, next_depth, node)
+            child_context = condition && field == "statements" ? context.merge(branch_condition: condition) : context
+            walk(child, "#{ast_path}.#{field}", child_context, next_depth, node)
           end
         end
+      end
+
+      def case_branch_condition(branch, parent)
+        return unless (1..8).cover?(branch.conditions.size)
+
+        expression = case_fragment(parent.predicate)
+        return unless expression
+
+        patterns = branch.conditions.filter_map { |node| case_fragment(node) if CASE_LITERAL_NODES.include?(node.class) }
+        return unless patterns.size == branch.conditions.size
+
+        { "expression" => expression, "patterns" => patterns.freeze }.freeze
+      end
+
+      def case_fragment(node)
+        return unless node
+
+        slice = node.location.slice
+        return unless slice.bytesize <= 120 && slice.valid_encoding? && !slice.match?(/[[:cntrl:]]/)
+
+        if slice.include?("<<")
+          heredoc = node.breadth_first_search do |part|
+            part.respond_to?(:opening_loc) && part.opening_loc&.slice&.start_with?("<<")
+          end
+          return if heredoc
+        end
+
+        slice.encode(Encoding::UTF_8).freeze
+      rescue EncodingError
+        nil
       end
 
       def operator_variants(node, parent)

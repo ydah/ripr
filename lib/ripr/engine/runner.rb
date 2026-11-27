@@ -153,7 +153,7 @@ module Ripr
           prepare_rails_workers(1, observer: reach_map)
           database_inputs = reach_map.database_inputs(@rails)
           tests = adapter.tests
-          result = run_baseline do
+          result = run_baseline(minimum_timeout_ms: @config[:timeout].fetch("base_ms")) do
             baseline = reach_map.capture(loading: false) { run_baseline_tests(adapter, nil) }
             baseline.merge("observations" => reach_map.observations)
           end
@@ -691,8 +691,9 @@ module Ripr
         end
       end
 
-      def run_baseline(allow_failure: false, &)
-        result = Child.call(timeout_ms: 60_000 + (@rails&.worker_timeout_ms || 0), &)
+      def run_baseline(allow_failure: false, minimum_timeout_ms: 0, &)
+        timeout_ms = [60_000, minimum_timeout_ms].max + (@rails&.worker_timeout_ms || 0)
+        result = Child.call(timeout_ms: timeout_ms, &)
         return result if result["success"] || allow_failure
 
         failures = result["failures"] || [result["error"] || result["status"]]
