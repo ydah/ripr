@@ -9,8 +9,8 @@ require "ripr/reporters"
 require "ripr/runtime"
 
 RSpec.describe "suggested mutation inputs" do
-  def gap(operator, observations, status: "not_infected")
-    source = "def calculate(left, right); left #{operator} right; end"
+  def gap(operator, observations, status: "not_infected", expression: "left #{operator} right")
+    source = "def calculate(left, right); #{expression}; end"
     analysis = Ripr::Core::Analyzer.call(source, "lib/sample.rb", operators: %w[comparison arithmetic], arid_callees: [])
     mutant = analysis.fetch(:mutants).first
     mutant = JSON.parse(JSON.generate(mutant)).merge("observed" => observations, "status" => status)
@@ -56,6 +56,56 @@ RSpec.describe "suggested mutation inputs" do
     candidates = gap("/", [[0, 1]]).fetch("suggested_inputs")
     expect(candidates).not_to be_empty
     candidates.each { |left, right| expect(left / right).not_to eq(left * right) }
+  end
+
+  it "uses an immediate Integer multiplication factor for a right operand suggestion" do
+    [
+      ["+", "left + right * 60", 60],
+      ["-", "left - (60 * right)", 60],
+      ["+", "left + right * -60", -60]
+    ].each do |operator, expression, value|
+      result = gap(operator, [[20, 0]], expression: expression)
+      expect(result.fetch("suggested_inputs")).to eq([[20, value]])
+    end
+  end
+
+  it "does not vary a zero or fully literal multiplication result" do
+    ["left + right * 0", "left - 2 * 0"].each do |expression|
+      expect(gap(expression.split[1], [[20, 0]], expression: expression)).not_to have_key("suggested_inputs")
+    end
+  end
+
+  it "does not invoke a customized Integer predicate to check the factor" do
+    mutant = {
+      "status" => "not_infected", "operator" => "arithmetic", "original_operator" => "+", "replacement" => "-",
+      "original" => "left + right * 60", "observed" => [[20, 0]]
+    }
+    original = Integer.instance_method(:zero?)
+    calls = []
+    result = begin
+      Integer.define_method(:zero?) do
+        calls << self if self == 60
+        original.bind_call(self)
+      end
+      Ripr::Core::InputSuggestions.for(mutant)
+    ensure
+      Integer.define_method(:zero?, original)
+    end
+
+    expect(result.fetch(:inputs)).to eq([[20, 60]])
+    expect(calls).to be_empty
+  end
+
+  it "retains generic behavior for unsupported operands instead of evaluating their arithmetic" do
+    operand = Class.new do
+      def +(_other) = raise "unsupported arithmetic was called"
+      def *(_other) = raise "unsupported arithmetic was called"
+    end.new
+    mutant = {
+      "status" => "not_infected", "operator" => "arithmetic", "original_operator" => "+", "replacement" => "-",
+      "original" => "left + right * 60", "observed" => [[operand, 0]]
+    }
+    expect(Ripr::Core::InputSuggestions.for(mutant)).to be_nil
   end
 
   it "keeps the generic guidance when samples do not preserve operand types or the gap is unrelated" do

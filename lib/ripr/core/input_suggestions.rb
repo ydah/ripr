@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "prism"
 require_relative "../runtime"
 require_relative "operators"
 
@@ -21,8 +22,13 @@ module Ripr
         observed = mutant.fetch("observed", [])
         fixed_operands = mutant.fetch("fixed_operands", [])
         samples = observed.select { |pair| pair.all? { |value| Operators.native_operand?(value, original) } }
+        right_step = 1
+        if %w[+ -].include?(original) && !samples.empty? && samples.all? { |pair| pair.all? { |value| Value::CLASS_OF.bind_call(value) == Integer } }
+          right_step = right_multiplier(mutant["original"], original) || 1
+          return if right_step == 0
+        end
         inputs = samples.filter_map do |sample|
-          candidates(*sample, original).find do |pair|
+          candidates(*sample, original, right_step).find do |pair|
             fixed_values_match = pair.each_with_index.all? { |value, index| !fixed_operands[index] || Value.same?(value, sample[index]) }
             fixed_values_match && infection.call(*pair, original) == true
           end
@@ -34,11 +40,31 @@ module Ripr
         { inputs: inputs, reason: reason }
       end
 
-      def self.candidates(left, right, original)
+      def self.right_multiplier(source, original)
+        return unless source
+
+        parsed = Prism.parse(source)
+        return if parsed.failure?
+
+        node = parsed.value.statements&.body&.first
+        matcher = Operators.fetch("arithmetic").matcher
+        return unless matcher.call(node, nil) && node.name.to_s == original
+
+        right = node.arguments.arguments.first
+        right = right.body&.body&.last while right.is_a?(Prism::ParenthesesNode)
+        return unless matcher.call(right, nil) && right.name == :*
+
+        operands = [right.receiver, right.arguments.arguments.first]
+        return 0 if operands.all?(Prism::IntegerNode)
+
+        operands.find { |operand| operand.is_a?(Prism::IntegerNode) }&.value
+      end
+
+      def self.candidates(left, right, original, right_step)
         return [[left, right]] if Operators::EQUALITY.include?(original)
         return [[as_type(right, left), right], [left, as_type(left, right)]] if BOUNDARY.include?(original)
 
-        nonzero_right = as_type(%w[+ -].include?(original) ? 1 : 2, right)
+        nonzero_right = as_type(%w[+ -].include?(original) ? right_step : 2, right)
         nonzero_left = as_type(3, left)
         [[left, nonzero_right], [nonzero_left, right], [left, as_type(left, right)], [nonzero_left, nonzero_right]]
       end
@@ -60,7 +86,7 @@ module Ripr
         "Both operators produced the same result for each sampled pair."
       end
 
-      private_class_method :candidates, :as_type, :explanation
+      private_class_method :right_multiplier, :candidates, :as_type, :explanation
     end
   end
 end
