@@ -314,6 +314,93 @@ RSpec.describe "ripr reach-map selection" do
     end
   end
 
+  {
+    "inherited" => ["Minitest::Test", "inherited(child)", 'child.name == "LastTest"'],
+    "method_added" => ["Minitest::Test", "method_added(name)", 'self.name == "LastTest" && name == :test_positive'],
+    "const_added" => ["Object", "const_added(name)", "name == :LastTest"]
+  }.each do |hook, (receiver, signature, condition)|
+    it "preserves verdicts with a custom Minitest #{hook} hook" do
+      support = <<~RUBY
+        #{receiver}.singleton_class.prepend(Module.new do
+          def #{signature}
+            super
+            $minimum = 5 if #{condition}
+          end
+        end)
+      RUBY
+      imports = <<~RUBY
+        require "minitest/autorun"
+        require "sample"
+        require "./test/support.rb"
+      RUBY
+      first = imports + <<~RUBY
+        class SampleTest < Minitest::Test
+          def test_calculate = assert_operator(Sample.calculate, :>=, $minimum || 0)
+        end
+      RUBY
+      last = imports + <<~RUBY
+        class LastTest < Minitest::Test
+          def test_positive = assert(Sample.positive?)
+        end
+      RUBY
+
+      with_project("test/first_test.rb" => first, "test/last_test.rb" => last, "test/support.rb" => support) do |directory|
+        base = capture(directory)
+        write(directory, "lib/sample.rb", source.sub("3 + 2", "4 + 2"))
+        selected = select_report(directory, base, "--reach-map-files", "test/last_test.rb")
+        full = report(directory, base)
+
+        expect(full.fetch("summary").fetch("killed")).to eq(4)
+        expect(selected.values_at("summary", "gaps")).to eq(full.values_at("summary", "gaps"))
+      end
+    end
+  end
+
+  {
+    "on_example_group_definition" => <<~RUBY,
+      config.on_example_group_definition do |group|
+        $minimum = 5 if group.metadata[:description] == "last"
+      end
+    RUBY
+    "define_derived_metadata" => 'config.define_derived_metadata(description: "last") { $minimum = 5 }',
+    "when_first_matching_example_defined" => <<~RUBY
+      config.when_first_matching_example_defined(full_description: "last is positive") { $minimum = 5 }
+    RUBY
+  }.each do |hook, code|
+    it "preserves verdicts with the RSpec #{hook} callback" do
+      support = <<~RUBY
+        RSpec.configure do |config|
+          #{code}
+        end
+      RUBY
+      imports = <<~RUBY
+        require "sample"
+        require "./spec/support.rb"
+      RUBY
+      first = imports + <<~RUBY
+        RSpec.describe "first" do
+          it("calculates") { expect(Sample.calculate).to be >= ($minimum || 0) }
+        end
+      RUBY
+      last = imports + <<~RUBY
+        RSpec.describe "last" do
+          it("is positive") { expect(Sample.positive?).to be(true) }
+        end
+      RUBY
+
+      with_project("spec/first_spec.rb" => first, "spec/last_spec.rb" => last, "spec/support.rb" => support) do |directory|
+        base = capture(directory)
+        write(directory, "lib/sample.rb", source.sub("3 + 2", "4 + 2"))
+        commit(directory, "edit method")
+        selected = select_report(directory, base, "--reach-map-files", "spec/last_spec.rb")
+        full = report(directory, base)
+
+        expect(full.fetch("summary").fetch("killed")).to eq(4)
+        expect(selected.values_at("summary", "gaps")).to eq(full.values_at("summary", "gaps"))
+      end
+    end
+  end
+
   it "retains a trailing RSpec file that registers a global hook" do
     first = rspec.sub("describe Sample", 'describe "first"').sub(/  it\("is positive"\).*\n/, "")
     first = first.sub("be >= 5", "be >= @minimum")
