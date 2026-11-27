@@ -22,6 +22,16 @@ RSpec.describe "Engine and runtime self-mutation" do
     expect(SelfMutateEngine.suite(mutant)).to include("spec/cache_cli_spec.rb", "spec/profile_spec.rb")
   end
 
+  it "uses the shard specifications for shard-only mutations in Runner" do
+    require_relative "../script/self_mutate_engine"
+
+    location = { file: "lib/ripr/engine/runner.rb" }
+    %w[record_shard_plan run_sharding empty_baseline write_shard_plan cache_metadata
+       use_shard_baseline validate_shard_baseline].each do |method|
+      mutant = { location: location, subject: "Ripr::Engine::Runner##{method}" }
+      expect(SelfMutateEngine.suite(mutant)).to eq(%w[spec/shard_cli_spec.rb spec/shard_merge_cli_spec.rb])
+    end
+  end
   it "runs known Engine and runtime variants with the same suites as their original sources" do
     options = ["--jobs", "2", "--only", "9b991da16a", "--only", "fca8dc001e"]
     output, error, status = Open3.capture3(RbConfig.ruby, script, *options, chdir: root)
