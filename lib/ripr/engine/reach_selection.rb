@@ -8,7 +8,7 @@ module Ripr
       class Unusable < Ripr::Error; end
 
       MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
-      FilePlan = Data.define(:tests, :ids)
+      FilePlan = Data.define(:tests, :ids, :superclasses)
       private_constant :FilePlan
 
       def initialize(config, sources, mutants)
@@ -67,9 +67,12 @@ module Ripr
 
         required |= paths - allowed
         retained = paths.take(paths.rindex { |path| required.include?(path) } + 1)
-        return paths if retained == paths || !declaration_suffix?(retained, paths.drop(retained.size), tests, framework)
+        return paths if retained == paths
 
-        @file_plan = FilePlan.new(tests.select { |_, test| retained.include?(test.fetch("file")) }, ids)
+        superclasses = declaration_superclasses(retained, paths.drop(retained.size), tests, framework)
+        return paths unless superclasses
+
+        @file_plan = FilePlan.new(tests.select { |_, test| retained.include?(test.fetch("file")) }, ids, superclasses)
         retained
       rescue Ripr::Error, SystemCallError, IOError, ArgumentError
         paths
@@ -86,6 +89,10 @@ module Ripr
 
         tests = discovered.to_h { |test| [test.fetch("id"), @capture.test_metadata(test)] }
         raise Unusable, "discovered tests changed" unless tests == (@file_plan&.tests || @artifact.fetch("tests"))
+
+        if @file_plan && !safe_registration?(framework, @file_plan.superclasses)
+          raise Unusable, "test file pruning cannot verify #{framework} registration hooks"
+        end
 
         @file_plan ? @file_plan.ids : select_ids(tests, paths, framework)
       rescue Unusable
@@ -111,25 +118,79 @@ module Ripr
         selected
       end
 
-      def declaration_suffix?(retained, omitted, tests, framework)
+      def declaration_superclasses(retained, omitted, tests, framework)
         retained_nodes = retained.map { |path| statements(path) }
         imports = retained_nodes.flat_map { |nodes| nodes.take_while { |node| literal_require(node) }.map { |node| literal_require(node) } }
         omitted_classes = []
+        superclasses = []
         omitted.each do |path|
           nodes = statements(path)
           requires = nodes.take_while { |node| literal_require(node) }
           declarations = nodes.drop(requires.size)
-          return false if declarations.empty? || requires.any? { |node| !imports.include?(literal_require(node)) }
+          return nil if declarations.empty? || requires.any? { |node| !imports.include?(literal_require(node)) }
 
           if framework == "minitest"
-            return false unless minitest_declarations?(path, declarations, tests)
+            return nil unless minitest_declarations?(path, declarations, tests)
 
             omitted_classes.concat(declarations.map(&:name))
+            superclasses.concat(declarations.map { |node| node.superclass.location.slice })
           else
-            return false unless declarations.all? { |node| literal_rspec_group?(node, receiver: "RSpec") }
+            return nil unless declarations.all? { |node| literal_rspec_group?(node, receiver: "RSpec") }
           end
         end
-        !registration_dependency?(retained_nodes.flatten, framework, omitted_classes)
+        return if registration_dependency?(retained_nodes.flatten, framework, omitted_classes)
+
+        superclasses.uniq
+      end
+
+      def safe_registration?(framework, superclasses)
+        if framework == "rspec"
+          config = ::RSpec.configuration
+          return false unless config.respond_to?(:on_example_group_definition_callbacks)
+
+          callbacks = config.on_example_group_definition_callbacks
+          return false unless callbacks.is_a?(Array) && callbacks.empty?
+
+          repository = config.instance_variable_get(:@derived_metadata_blocks)
+          return false unless repository.respond_to?(:items_and_filters)
+
+          filters = repository.items_and_filters
+          return filters.is_a?(Array) && filters.empty?
+        end
+
+        paths = %w[minitest activesupport].flat_map { |name| Gem.loaded_specs[name]&.full_require_paths || [] }
+        roots = paths.filter_map { |path| "#{File.realpath(path)}/" if File.directory?(path) }
+        return false unless standard_hook?(Object, :const_added, Module, [])
+
+        superclasses.all? do |superclass|
+          namespace, name = superclass.split("::")
+          namespace = loaded_constant(Object, namespace)
+          next false unless namespace.is_a?(Module)
+
+          base = loaded_constant(namespace, name)
+          next false unless base.is_a?(Class)
+
+          standard_hook?(base, :inherited, Class, roots) && standard_hook?(base, :method_added, Module, roots)
+        end
+      rescue NameError, TypeError, SystemCallError
+        false
+      end
+
+      def standard_hook?(receiver, name, native_owner, roots)
+        hook = receiver.method(name)
+        while (source = hook.source_location&.first)
+          return false unless File.realpath(source).start_with?(*roots)
+
+          hook = hook.super_method
+          return false unless hook
+        end
+        hook.owner == native_owner && hook.original_name == name && hook.super_method.nil?
+      end
+
+      def loaded_constant(namespace, name)
+        return if namespace.autoload?(name, false) || !namespace.const_defined?(name, false)
+
+        namespace.const_get(name, false)
       end
 
       def registration_dependency?(nodes, framework, omitted_classes)

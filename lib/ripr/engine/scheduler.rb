@@ -1,11 +1,15 @@
 # frozen_string_literal: true
 
 require_relative "child"
+require_relative "implicit_returns"
 require_relative "method_exits"
 
 module Ripr
   module Engine
     class Scheduler
+      Trial = Data.define(:mutant, :targets, :return_sites)
+      private_constant :Trial
+
       def initialize(config, baseline, table, cache, targets:, warnings:, metrics:, rails: nil, static_run: nil, profile: nil)
         @config = config
         @baseline = baseline
@@ -126,7 +130,7 @@ module Ripr
         end
       end
 
-      def execute(mutant, slot, adapter, original: false, targets: nil)
+      def execute(mutant, slot, adapter, original: false, targets: nil, return_sites: [])
         tests = mutant.fetch("test_ids")
         run = lambda do
           if mutant["static"]
@@ -137,8 +141,10 @@ module Ripr
               R.activate(site, @table.fetch(site).index(mutant.fetch("id")) + 1)
             end
             if targets
-              result, exits = MethodExits.observe(targets) { adapter.run(tests, fail_fast: true) }
-              result.merge("exits" => exits)
+              (result, exits), returns = ImplicitReturns.observe(return_sites, tests) do
+                MethodExits.observe(targets) { adapter.run(tests, fail_fast: true) }
+              end
+              result.merge("exits" => exits, "implicit_returns" => returns)
             elsif @cache.graph && !original
               result, dependencies = @cache.graph.trace { adapter.run(tests, fail_fast: true) }
               result.merge("dependency_hashes" => @cache.graph.signature(dependencies))
@@ -167,31 +173,42 @@ module Ripr
         return {} if survivors.empty?
 
         targets = @targets.call.slice(*survivors.map { |mutant| mutant.fetch("subject") }.uniq)
-        jobs = survivors.select { |mutant| targets.key?(mutant.fetch("subject")) }
+        jobs = survivors.select { |mutant| targets.key?(mutant.fetch("subject")) || ImplicitReturns.site(mutant) }
         originals = stable_exits(jobs, targets, adapter)
         trials = jobs.filter_map do |mutant|
+          baseline = originals[mutant.fetch("test_ids")]
+          next unless baseline
+
           subject = mutant.fetch("subject")
-          [mutant, targets.slice(subject)] if originals.dig(mutant.fetch("test_ids"), "exits", subject)
+          site = ImplicitReturns.site(mutant)
+          method_targets = baseline.fetch("exits").key?(subject) ? targets.slice(subject) : {}
+          return_sites = baseline.fetch("implicit_returns").key?(site) ? [site] : []
+          Trial.new(mutant, method_targets, return_sites) unless method_targets.empty? && return_sites.empty?
         end
-        observe_trials(trials, adapter, original: false).each_with_object({}) do |((mutant, _), outcome), diagnoses|
+        observe_trials(trials, adapter, original: false).each_with_object({}) do |(trial, outcome), diagnoses|
+          mutant = trial.mutant
           ids = mutant.fetch("test_ids")
           baseline = originals.fetch(ids)
           next unless outcome["success"] && outcome.fetch("tests").keys == baseline.fetch("order")
 
           subject = mutant.fetch("subject")
-          diagnosis = MethodExits.compare(baseline.fetch("exits").fetch(subject), outcome.fetch("exits")[subject], ids)
+          diagnosis = MethodExits.compare(baseline.fetch("exits")[subject], outcome.fetch("exits")[subject], ids)
+          if !diagnosis && (site = trial.return_sites.first)
+            diagnosis = ImplicitReturns.compare(baseline.fetch("implicit_returns")[site], outcome.fetch("implicit_returns")[site], ids)
+          end
           diagnoses[mutant.fetch("full_id")] = diagnosis if diagnosis
         end
       end
 
       def stable_exits(jobs, targets, adapter)
         trials = jobs.group_by { |mutant| mutant.fetch("test_ids") }.values.map do |group|
-          [group.first, targets.slice(*group.map { |mutant| mutant.fetch("subject") })]
+          subjects = group.map { |mutant| mutant.fetch("subject") }
+          Trial.new(group.first, targets.slice(*subjects), group.filter_map(&ImplicitReturns.method(:site)))
         end
         first = observe_trials(trials, adapter, original: true).to_h
-        repeated = trials.select do |mutant, subjects|
-          outcome = first.fetch([mutant, subjects])
-          outcome["success"] && outcome.fetch("tests").keys.sort == mutant.fetch("test_ids").sort
+        repeated = trials.select do |trial|
+          outcome = first.fetch(trial)
+          outcome["success"] && outcome.fetch("tests").keys.sort == trial.mutant.fetch("test_ids").sort
         end
         observe_trials(repeated, adapter, original: true).each_with_object({}) do |(trial, outcome), stable|
           before = first.fetch(trial)
@@ -199,17 +216,18 @@ module Ripr
           next unless outcome["success"] && outcome.fetch("tests").keys == order
 
           exits = MethodExits.stable(before.fetch("exits"), outcome.fetch("exits"))
-          stable[trial.first.fetch("test_ids")] = { "exits" => exits, "order" => order }
+          returns = ImplicitReturns.stable(before.fetch("implicit_returns"), outcome.fetch("implicit_returns"))
+          stable[trial.mutant.fetch("test_ids")] = { "exits" => exits, "implicit_returns" => returns, "order" => order }
         end
       end
 
       def observe_trials(trials, adapter, original:)
         # Rails exposes the slot to tests through TEST_ENV_NUMBER.
         jobs = @rails ? 1 : @config[:jobs]
-        timeout = ->((mutant, _)) { deadline(mutant) }
-        on_result = ->((mutant, _), outcome, elapsed) { @profile.record_diagnosis(mutant, outcome, elapsed) } if @profile
-        Child.batch(trials, jobs: jobs, timeout: timeout, on_result:) do |(mutant, targets), slot|
-          execute(mutant, slot, adapter, original: original, targets: targets)
+        timeout = ->(trial) { deadline(trial.mutant) }
+        on_result = ->(trial, outcome, elapsed) { @profile.record_diagnosis(trial.mutant, outcome, elapsed) } if @profile
+        Child.batch(trials, jobs: jobs, timeout: timeout, on_result:) do |trial, slot|
+          execute(trial.mutant, slot, adapter, original: original, targets: trial.targets, return_sites: trial.return_sites)
         end
       end
     end

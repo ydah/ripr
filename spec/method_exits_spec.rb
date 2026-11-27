@@ -354,7 +354,7 @@ RSpec.describe Ripr::Engine::MethodExits do
     expect(observations.fetch("Sample#compute").fetch("small")).to be_frozen
   end
 
-  it "keeps every exit at the per-test call limit and drops the subject on the next call" do
+  it "preserves observed exits through the per-test call limit" do
     instance = subject_class.new
     targets = { "Sample#compute" => instance.method(:compute) }
     _, observations = described_class.observe(targets) do
@@ -362,10 +362,29 @@ RSpec.describe Ripr::Engine::MethodExits do
     end
     expect(observations).to eq("Sample#compute" => { "test" => Array.new(32, returned(false)) })
 
-    _, overflow = described_class.observe(targets) do
-      as_test("test") { 33.times { instance.compute(false) } }
+    limit = described_class::MAX_CALLS_PER_TEST
+    capture = lambda do |first, count|
+      described_class.observe(targets) do
+        as_test("large") do
+          instance.compute(first)
+          (count - 1).times { instance.compute(false) }
+        end
+      end.last
     end
-    expect(overflow).to eq("Sample#compute" => nil)
+
+    original = capture.call(false, limit + 1)
+    repeat = capture.call(false, limit + 1)
+    stable = described_class.stable(original, repeat).fetch("Sample#compute")
+    changed = JSON.parse(JSON.generate(capture.call(true, limit + 1))).fetch("Sample#compute")
+    shorter = capture.call(false, limit - 1).fetch("Sample#compute")
+
+    expect(described_class.compare(stable, changed, ["large"])).to eq(
+      "status" => "not_revealed",
+      "propagation" => { "test_id" => "large", "call" => 1, "original" => returned(false), "mutant" => returned(true) }
+    )
+    expect(described_class.compare(stable, original.fetch("Sample#compute"), ["large"])).to be_nil
+    expect(described_class.compare(stable, shorter, ["large"])).to be_nil
+    expect(described_class.compare(shorter, stable, ["large"])).to be_nil
   end
 
   it "keeps complete tests when calls across tests exceed the per-subject limit" do
@@ -488,6 +507,8 @@ RSpec.describe Ripr::Engine::MethodExits do
       as_test("overflow") { 33.times { instance.value } }
     end
 
-    expect(observations).to eq("value" => { "complete" => [["return", ["Integer", 1]]] })
+    stable = exits.stable(observations, observations).fetch("value")
+    expect(stable.keys).to contain_exactly("complete", "overflow")
+    expect(exits.compare(stable, observations.fetch("value"), ["overflow"])).to be_nil
   end
 end
