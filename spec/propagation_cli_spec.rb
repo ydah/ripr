@@ -2,6 +2,7 @@
 
 require "fileutils"
 require "json"
+require "json_schemer"
 require "open3"
 require "rbconfig"
 require "tmpdir"
@@ -59,6 +60,8 @@ RSpec.describe "method-exit mutation diagnosis" do
       expect(status.exitstatus).to eq(0), error
       json, *text = output.lines
       report = JSON.parse(json)
+      schema = JSONSchemer.schema(Pathname.new(File.expand_path("../schema/agent-v2.json", __dir__)))
+      expect(schema.validate(report).to_a).to be_empty
       expect(report.fetch("summary")).to include("killed" => 0, "error" => 0, "timeout" => 0, "survived" => 2)
       gaps = report.fetch("gaps").to_h { |gap| [gap.fetch("subject"), gap] }
       gap = gaps.fetch("Sample.compute")
