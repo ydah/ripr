@@ -9,6 +9,7 @@ require_relative "core/input_suggestions"
 require_relative "core/operators"
 require_relative "reporters/html"
 require_relative "reporters/triage"
+require_relative "reporters/comparison_inputs"
 
 module Ripr
   module Reporters
@@ -44,6 +45,8 @@ module Ripr
         hint += " Observed operands: #{JSON.generate(observed)}." if status == "not_infected" && !observed.empty?
         suggestion = Core::InputSuggestions.for(mutant)
         hint += " #{suggestion_message(suggestion)}" if suggestion
+        comparison = mutant["comparison_inputs"] if triage
+        hint += " #{comparison_message(mutant)}" if comparison
         hint += " #{load_note(mutant)}" if mutant["load_reached"]
         flags = ""
         flags += " --rails" if config && config[:rails]
@@ -59,6 +62,7 @@ module Ripr
           gap["stage"] = status
           gap["priority"] = triage.priorities.fetch(mutant.fetch("full_id"))
           gap["equivalence_suspected"] = true if equivalence
+          gap["comparison_inputs"] = comparison if comparison
         else
           gap["kind"] = kind
           gap["stage"] = status if diagnosed
@@ -85,6 +89,7 @@ module Ripr
           reason = mutant["accepted"] || mutant["invalid_reason"] || mutant["error"] || mutant.fetch("status")
           suggestion = Core::InputSuggestions.for(mutant)
           reason += ". #{suggestion_message(suggestion)}" if suggestion
+          reason += ". #{comparison_message(mutant)}" if mutant["comparison_inputs"]
           reason += ". #{propagation_message(mutant)}" if mutant["propagation"]
           if (condition = branch_condition(mutant))
             reason += ". #{branch_hint(condition)}"
@@ -103,10 +108,11 @@ module Ripr
     end
 
     def self.write(results, runner, config, stdout: $stdout)
+      reporters = config[:reporters]
+      results = ComparisonInputs.enrich(results, runner.sources) if reporters.intersect?(%w[text agent-v2 json html])
       summary = Core::Classifier.summary(results)
       summary["static"] += runner.static
       run = { "since" => config[:since], "scope" => config[:scope], "framework" => runner.framework, "metrics" => runner.metrics }
-      reporters = config[:reporters]
       if reporters.include?("agent-v2") || (reporters.include?("text") && !config[:dry_run])
         triage = Triage.build(results, changed: runner.changed_source_lines, public_subjects: runner.public_subjects)
       end
@@ -183,6 +189,7 @@ module Ripr
         stdout.puts "  suggested inputs: #{JSON.generate(suggestion.fetch(:inputs))}"
         stdout.puts "  #{suggestion[:reason]}" if suggestion[:reason]
       end
+      stdout.puts "  #{comparison_message(mutant)}" if mutant["comparison_inputs"]
       stdout.puts "  #{load_note(mutant)}" if mutant["load_reached"]
     end
 
@@ -201,6 +208,16 @@ module Ripr
 
     def self.branch_hint(condition)
       "To reach this branch, #{condition.fetch('expression')} must match #{condition.fetch('patterns').join(' or ')} after earlier clauses."
+    end
+
+    def self.comparison_message(mutant)
+      inputs = mutant.fetch("comparison_inputs")
+      subject = mutant.fetch("subject")
+      sign = Value::VALUE_COMPARATORS.fetch(Integer).fetch(:<=>).bind_call(*inputs.fetch("values"))
+      "Use fixture instances for #{subject} with values #{JSON.generate(inputs.fetch('values'))} for " \
+        "#{inputs.fetch('left')} <=> #{inputs.fetch('right')} and make #{inputs.fetch('zero_comparisons').join(' and ')} return zero. " \
+        "Assert (left <=> right) == #{sign} and (right <=> left) == #{-sign}. " \
+        "Field values were sampled independently in #{subject.delete_suffix('#<=>')}#==."
     end
 
     def self.suggestion_message(suggestion)
@@ -238,7 +255,8 @@ module Ripr
       end
     end
 
-    private_class_method :suggestion_message, :equivalence_hint, :propagation_message, :describe_exit, :write_text, :write_gap
+    private_class_method :comparison_message, :suggestion_message, :equivalence_hint, :propagation_message, :describe_exit,
+                         :write_text, :write_gap
 
     def self.html(report)
       HTML.render(report)
